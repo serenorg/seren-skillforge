@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from skillforge.cli import app
@@ -214,3 +215,34 @@ def test_publish_rejects_unknown_conventional_change_type(tmp_path: Path) -> Non
 
     assert result.exit_code != 0
     assert "Unsupported --change-type" in result.output
+
+
+def test_publish_create_pr_fails_fast_when_pr_title_is_not_conventional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _create_generated_source(tmp_path)
+    target_repo = tmp_path / "seren-skills"
+    target_repo.mkdir()
+    _init_git_repo(target_repo)
+
+    monkeypatch.setattr(
+        publish_command,
+        "_default_pr_title",
+        lambda **_: "Add spectra PT yield trader skill",
+    )
+    shell = _RecordingShell()
+
+    with pytest.raises(publish_command.PublishError, match="PR title must follow conventional"):
+        publish_command.run(
+            source=source,
+            target=target_repo,
+            org="spectra",
+            name="spectra-pt-yield-trader",
+            force=False,
+            create_pr=True,
+            base_branch="main",
+            branch_name="skillforge/test-invalid-title",
+            change_type="feat",
+            scope=None,
+            shell=shell,
+        )
