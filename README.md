@@ -36,6 +36,7 @@ python -m pip install -e ".[dev]"
 make format
 make lint
 make test
+make check-generated
 ```
 
 ## CLI Quickstart
