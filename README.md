@@ -45,6 +45,16 @@ make check-generated
 python -m skillforge --help
 skillforge --help
 python -m skillforge validate --spec examples/minimal/skill.spec.yaml
+python -m skillforge validate --spec examples/polymarket-trader/skill.spec.yaml --online-publishers --require-api-key
+python -m skillforge resolve-publishers --spec examples/polymarket-trader/skill.spec.yaml --check --require-api-key
+python -m skillforge resolve-publishers --spec examples/polymarket-trader/skill.spec.yaml --write --require-api-key
 python -m skillforge generate --spec examples/minimal/skill.spec.yaml --out /tmp/skillforge-out
+python -m skillforge generate --spec examples/polymarket-trader/skill.spec.yaml --out /tmp/skillforge-out --resolve-publishers --require-api-key
 python -m skillforge test --mode quick --spec examples/minimal/skill.spec.yaml
 ```
+
+## Publisher Guardrails
+
+- `validate` now blocks guessed RPC slugs like `rpc-ethereum` unless explicitly allowlisted via `--allow-guessed-publisher-slug`.
+- `resolve-publishers` resolves connector publisher slugs from live gateway catalog (`GET /publishers`) and can rewrite stale slugs in `skill.spec.yaml`.
+- CI runs online checks for all example specs and fails if publishers are unknown/inactive or unresolved.

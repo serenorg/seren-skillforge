@@ -33,3 +33,10 @@ jobs:
       - name: Check generated drift
         run: make check-generated PYTHON=python
 
+      - name: Online publisher validation
+        env:
+          SEREN_API_KEY: ${{ secrets.SEREN_API_KEY }}
+          SEREN_GATEWAY_URL: https://api.serendb.com
+        run: |
+          chmod +x scripts/ci/check_publishers_online.sh
+          PYTHON=python bash scripts/ci/check_publishers_online.sh
