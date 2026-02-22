@@ -7,6 +7,7 @@ import typer
 from skillforge.commands import generate as generate_command
 from skillforge.commands import init as init_command
 from skillforge.commands import publish as publish_command
+from skillforge.commands import resolve_publishers as resolve_publishers_command
 from skillforge.commands import test as test_command
 from skillforge.commands import validate as validate_command
 
@@ -36,6 +37,7 @@ app.command("validate")(validate_command.command)
 app.command("generate")(generate_command.command)
 app.command("test")(test_command.command)
 app.command("publish")(publish_command.command)
+app.command("resolve-publishers")(resolve_publishers_command.command)
 
 
 if __name__ == "__main__":

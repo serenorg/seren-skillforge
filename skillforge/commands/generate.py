@@ -8,8 +8,10 @@ from skillforge.codegen.config_files import render_config_example_json, render_e
 from skillforge.codegen.generated_tests import render_fixture_payloads, render_smoke_test
 from skillforge.codegen.runtime_python import render_agent_py
 from skillforge.codegen.skill_md import render_skill_md
+from skillforge.commands import resolve_publishers as resolve_publishers_command
 from skillforge.commands import validate as validate_command
 from skillforge.parser import parse_spec
+from skillforge.publisher_catalog import DEFAULT_GATEWAY_URL
 
 
 def _render_outputs(spec_path: Path) -> dict[Path, str]:
@@ -66,7 +68,55 @@ def command(
         "--check",
         help="Check whether generated outputs are up-to-date without writing.",
     ),
+    resolve_publishers: bool = typer.Option(
+        False,
+        "--resolve-publishers/--no-resolve-publishers",
+        help="Require connectors to resolve against live publisher catalog before generation.",
+    ),
+    gateway_url: str = typer.Option(
+        DEFAULT_GATEWAY_URL,
+        "--gateway-url",
+        help="Seren gateway base URL for publisher resolution.",
+    ),
+    api_key_env: str = typer.Option(
+        "SEREN_API_KEY",
+        "--api-key-env",
+        help="Environment variable name for optional Bearer API key.",
+    ),
+    require_api_key: bool = typer.Option(
+        False,
+        "--require-api-key",
+        help="Fail if publisher resolution is enabled and API key env var is missing.",
+    ),
 ) -> None:
+    if resolve_publishers:
+        resolved = resolve_publishers_command.run(
+            spec=spec,
+            gateway_url=gateway_url,
+            api_key_env=api_key_env,
+            require_api_key=require_api_key,
+            allow_inactive=False,
+            write=False,
+        )
+        if not resolved.ok:
+            typer.echo(
+                f"FAIL [generate] publisher resolution failed catalog={resolved.catalog_size}"
+            )
+            for issue in resolved.issues:
+                typer.echo(f"[{issue.code}] {issue.path}: {issue.message}")
+            raise typer.Exit(code=1)
+        if resolved.changes:
+            typer.echo(
+                f"FAIL [generate] unresolved publisher slugs={len(resolved.changes)}. "
+                "Run `skillforge resolve-publishers --write` first."
+            )
+            for change in resolved.changes:
+                typer.echo(
+                    f"{change.connector}: {change.from_slug or '<empty>'} -> "
+                    f"{change.to_slug} ({change.source})"
+                )
+            raise typer.Exit(code=1)
+
     validation = validate_command.run(spec=spec)
     if not validation.ok:
         typer.echo(f"FAIL [generate] spec validation failed checks={validation.checks_run}")

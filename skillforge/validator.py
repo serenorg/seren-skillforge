@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from skillforge.models import SkillSpecModel
 from skillforge.parser import parse_spec
+
+GUESSED_RPC_SLUG_PATTERN = re.compile(r"^rpc-[a-z0-9-]+$")
 
 
 @dataclass(frozen=True)
@@ -42,8 +45,13 @@ def _extract_step_reference_targets(step_args: dict[str, Any]) -> list[str]:
     return refs
 
 
-def validate_semantics(spec: SkillSpecModel) -> SemanticValidationResult:
+def validate_semantics(
+    spec: SkillSpecModel,
+    *,
+    allow_guessed_publisher_slugs: set[str] | None = None,
+) -> SemanticValidationResult:
     diagnostics: list[SemanticDiagnostic] = []
+    allow_guessed = allow_guessed_publisher_slugs or set()
 
     # Rule: workflow step IDs must be unique.
     seen_step_ids: set[str] = set()
@@ -103,6 +111,37 @@ def validate_semantics(spec: SkillSpecModel) -> SemanticValidationResult:
                 )
         available_step_ids.add(step.id)
 
+    # Rule: publisher connector slugs must be explicit, non-empty values.
+    for connector_name, connector in spec.connectors.items():
+        publisher = connector.publisher
+        if publisher is None or not str(publisher).strip():
+            diagnostics.append(
+                SemanticDiagnostic(
+                    code="missing_publisher_slug",
+                    path=f"connectors.{connector_name}.publisher",
+                    message=(
+                        f"Connector '{connector_name}' must define a non-empty publisher slug."
+                    ),
+                )
+            )
+            continue
+
+        publisher_slug = str(publisher).strip()
+        if (
+            GUESSED_RPC_SLUG_PATTERN.fullmatch(publisher_slug)
+            and publisher_slug not in allow_guessed
+        ):
+            diagnostics.append(
+                SemanticDiagnostic(
+                    code="guessed_publisher_slug",
+                    path=f"connectors.{connector_name}.publisher",
+                    message=(
+                        f"Connector '{connector_name}' uses guessed publisher slug "
+                        f"'{publisher_slug}'. Resolve against live catalog or allowlist it."
+                    ),
+                )
+            )
+
     # Rule: risk skills need explicit safety policy configuration.
     if _is_risk_skill(spec):
         if spec.policies is None:
@@ -148,6 +187,13 @@ def validate_semantics(spec: SkillSpecModel) -> SemanticValidationResult:
     return SemanticValidationResult(diagnostics=diagnostics)
 
 
-def validate_semantics_from_path(path: Path) -> SemanticValidationResult:
+def validate_semantics_from_path(
+    path: Path,
+    *,
+    allow_guessed_publisher_slugs: set[str] | None = None,
+) -> SemanticValidationResult:
     parsed = parse_spec(path)
-    return validate_semantics(parsed.model)
+    return validate_semantics(
+        parsed.model,
+        allow_guessed_publisher_slugs=allow_guessed_publisher_slugs,
+    )

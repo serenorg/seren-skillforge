@@ -51,69 +51,6 @@ def _format_parse_error(
     return (HarnessFailure(code=code, path="<root>", message=message),)
 
 
-def _run_quick_with_parse(spec_path: Path) -> _QuickOutcome:
-    try:
-        parsed = parse_spec(spec_path)
-    except SkillSpecSchemaError as exc:
-        return _QuickOutcome(
-            result=HarnessResult(
-                mode="quick",
-                ok=False,
-                checks_run=1,
-                failures=_format_parse_error(
-                    code="schema_validation_error",
-                    message=str(exc),
-                    diagnostics=exc.diagnostics,
-                ),
-            ),
-            parsed_spec=None,
-        )
-    except SkillSpecParseError as exc:
-        return _QuickOutcome(
-            result=HarnessResult(
-                mode="quick",
-                ok=False,
-                checks_run=1,
-                failures=_format_parse_error(
-                    code="parse_error",
-                    message=str(exc),
-                    diagnostics=exc.diagnostics,
-                ),
-            ),
-            parsed_spec=None,
-        )
-
-    semantic_result = validate_semantics(parsed.model)
-    if semantic_result.diagnostics:
-        failures = tuple(
-            HarnessFailure(
-                code=diagnostic.code,
-                path=diagnostic.path,
-                message=diagnostic.message,
-            )
-            for diagnostic in semantic_result.diagnostics
-        )
-        return _QuickOutcome(
-            result=HarnessResult(
-                mode="quick",
-                ok=False,
-                checks_run=2,
-                failures=failures,
-            ),
-            parsed_spec=parsed,
-        )
-
-    return _QuickOutcome(
-        result=HarnessResult(
-            mode="quick",
-            ok=True,
-            checks_run=2,
-            failures=(),
-        ),
-        parsed_spec=parsed,
-    )
-
-
 def _resolve_scalar(
     key: str | None,
     value: str,
@@ -269,8 +206,12 @@ def run_harness(
     mode: HarnessMode,
     spec_path: Path,
     fixture_path: Path | None = None,
+    allow_guessed_publisher_slugs: set[str] | None = None,
 ) -> HarnessResult:
-    quick_outcome = _run_quick_with_parse(spec_path)
+    quick_outcome = _run_quick_with_parse_with_options(
+        spec_path,
+        allow_guessed_publisher_slugs=allow_guessed_publisher_slugs,
+    )
     if mode == "quick":
         return quick_outcome.result
 
@@ -311,4 +252,74 @@ def run_harness(
         ok=smoke_result.ok,
         checks_run=quick_outcome.result.checks_run + smoke_result.checks_run,
         failures=smoke_result.failures,
+    )
+
+
+def _run_quick_with_parse_with_options(
+    spec_path: Path,
+    *,
+    allow_guessed_publisher_slugs: set[str] | None,
+) -> _QuickOutcome:
+    try:
+        parsed = parse_spec(spec_path)
+    except SkillSpecSchemaError as exc:
+        return _QuickOutcome(
+            result=HarnessResult(
+                mode="quick",
+                ok=False,
+                checks_run=1,
+                failures=_format_parse_error(
+                    code="schema_validation_error",
+                    message=str(exc),
+                    diagnostics=exc.diagnostics,
+                ),
+            ),
+            parsed_spec=None,
+        )
+    except SkillSpecParseError as exc:
+        return _QuickOutcome(
+            result=HarnessResult(
+                mode="quick",
+                ok=False,
+                checks_run=1,
+                failures=_format_parse_error(
+                    code="parse_error",
+                    message=str(exc),
+                    diagnostics=exc.diagnostics,
+                ),
+            ),
+            parsed_spec=None,
+        )
+
+    semantic_result = validate_semantics(
+        parsed.model,
+        allow_guessed_publisher_slugs=allow_guessed_publisher_slugs or set(),
+    )
+    if semantic_result.diagnostics:
+        failures = tuple(
+            HarnessFailure(
+                code=diagnostic.code,
+                path=diagnostic.path,
+                message=diagnostic.message,
+            )
+            for diagnostic in semantic_result.diagnostics
+        )
+        return _QuickOutcome(
+            result=HarnessResult(
+                mode="quick",
+                ok=False,
+                checks_run=2,
+                failures=failures,
+            ),
+            parsed_spec=parsed,
+        )
+
+    return _QuickOutcome(
+        result=HarnessResult(
+            mode="quick",
+            ok=True,
+            checks_run=2,
+            failures=(),
+        ),
+        parsed_spec=parsed,
     )

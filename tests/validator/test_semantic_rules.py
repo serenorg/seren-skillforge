@@ -34,6 +34,7 @@ def test_valid_fixture_passes_semantic_checks() -> None:
         ("invalid_step_reference_future.yaml", "invalid_step_reference"),
         ("invalid_risk_missing_policies.yaml", "missing_policies"),
         ("invalid_risk_missing_budget_caps.yaml", "risk_budget_cap_required"),
+        ("invalid_guessed_rpc_slug.yaml", "guessed_publisher_slug"),
     ],
 )
 def test_invalid_fixtures_produce_expected_semantic_codes(
@@ -44,3 +45,12 @@ def test_invalid_fixtures_produce_expected_semantic_codes(
 
     assert expected_code in _diagnostic_codes(path)
 
+
+def test_allowlist_can_permit_intentional_guessed_slug() -> None:
+    path = REPO_ROOT / "tests/validator/fixtures/invalid_guessed_rpc_slug.yaml"
+    parsed = parse_spec(path)
+    result = validate_semantics(
+        parsed.model,
+        allow_guessed_publisher_slugs={"rpc-ethereum"},
+    )
+    assert "guessed_publisher_slug" not in {diagnostic.code for diagnostic in result.diagnostics}

@@ -1,0 +1,17 @@
+skill: guessed-rpc-slug
+description: Uses guessed rpc-* slug that must be resolved first.
+triggers:
+  - resolve publishers
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+connectors:
+  rpc_ethereum:
+    kind: seren_publisher
+    publisher: rpc-ethereum
+workflow:
+  steps:
+    - id: probe
+      use: connector.rpc_ethereum.post
+      with:
+        path: /
