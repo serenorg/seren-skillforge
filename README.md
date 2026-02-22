@@ -43,4 +43,7 @@ make test
 ```bash
 python -m skillforge --help
 skillforge --help
+python -m skillforge validate --spec examples/minimal/skill.spec.yaml
+python -m skillforge generate --spec examples/minimal/skill.spec.yaml --out /tmp/skillforge-out
+python -m skillforge test --mode quick --spec examples/minimal/skill.spec.yaml
 ```

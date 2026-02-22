@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from typer.testing import CliRunner
+
+from skillforge.cli import app
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+runner = CliRunner()
+
+
+def test_generate_writes_expected_artifacts(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "generate",
+            "--spec",
+            str(REPO_ROOT / "examples/browser-automation/skill.spec.yaml"),
+            "--out",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    expected_paths = {
+        "SKILL.md",
+        "scripts/agent.py",
+        ".env.example",
+        "config.example.json",
+        "tests/test_smoke.py",
+        "tests/fixtures/happy_path.json",
+        "tests/fixtures/connector_failure.json",
+        "tests/fixtures/policy_violation.json",
+        "tests/fixtures/dry_run_guard.json",
+    }
+    existing_paths = {
+        str(path.relative_to(tmp_path).as_posix())
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert expected_paths <= existing_paths
+    assert "Generated" in result.output
+
+
+def test_generate_check_fails_when_outputs_are_stale(tmp_path: Path) -> None:
+    spec = REPO_ROOT / "examples/browser-automation/skill.spec.yaml"
+
+    initial = runner.invoke(
+        app,
+        [
+            "generate",
+            "--spec",
+            str(spec),
+            "--out",
+            str(tmp_path),
+        ],
+    )
+    assert initial.exit_code == 0, initial.output
+
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text("# stale file\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "generate",
+            "--spec",
+            str(spec),
+            "--out",
+            str(tmp_path),
+            "--check",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "stale" in result.output.lower()
+    assert "SKILL.md" in result.output
+
+
+def test_generate_check_passes_when_outputs_match(tmp_path: Path) -> None:
+    spec = REPO_ROOT / "examples/minimal/skill.spec.yaml"
+    generated = runner.invoke(
+        app,
+        [
+            "generate",
+            "--spec",
+            str(spec),
+            "--out",
+            str(tmp_path),
+        ],
+    )
+    assert generated.exit_code == 0, generated.output
+
+    check = runner.invoke(
+        app,
+        [
+            "generate",
+            "--spec",
+            str(spec),
+            "--out",
+            str(tmp_path),
+            "--check",
+        ],
+    )
+
+    assert check.exit_code == 0, check.output
+    assert "up-to-date" in check.output.lower()

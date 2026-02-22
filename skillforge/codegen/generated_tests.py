@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from skillforge.ir import NormalizedSkillSpec
 
@@ -37,6 +38,78 @@ def render_smoke_test(spec: NormalizedSkillSpec) -> str:
     )
 
 
+def _default_input_value(definition: dict[str, Any]) -> Any:
+    if "default" in definition:
+        return definition["default"]
+
+    input_type = definition.get("type")
+    if input_type == "string":
+        return ""
+    if input_type == "number":
+        return 0.0
+    if input_type == "integer":
+        return 0
+    if input_type == "boolean":
+        return False
+    return None
+
+
+def _connector_actions(spec: NormalizedSkillSpec) -> dict[str, set[str]]:
+    actions: dict[str, set[str]] = {}
+    for step in spec.workflow_steps:
+        if not step.use.startswith("connector."):
+            continue
+        parts = step.use.split(".")
+        if len(parts) < 3:
+            continue
+        actions.setdefault(parts[1], set()).add(parts[2])
+    return actions
+
+
+def _build_connector_payloads(
+    spec: NormalizedSkillSpec,
+    *,
+    failure: bool,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    connectors: dict[str, dict[str, dict[str, Any]]] = {}
+    action_map = _connector_actions(spec)
+    first_connector = sorted(action_map.keys())[0] if action_map else None
+
+    for connector_name in sorted(action_map.keys()):
+        connectors[connector_name] = {}
+        for action in sorted(action_map[connector_name]):
+            payload: dict[str, Any] = {
+                "status": "ok",
+                "connector": connector_name,
+                "action": action,
+            }
+            if failure and connector_name == first_connector:
+                payload["status"] = "error"
+                payload["error_code"] = "connector_failure"
+            connectors[connector_name][action] = payload
+
+    return connectors
+
+
+def _with_harness_metadata(
+    *,
+    fixture_name: str,
+    payload: dict[str, Any],
+    spec: NormalizedSkillSpec,
+) -> dict[str, Any]:
+    if fixture_name == "happy_path.json":
+        payload["inputs"] = {
+            input_name: _default_input_value(definition)
+            for input_name, definition in sorted(spec.inputs.items())
+        }
+        payload["connectors"] = _build_connector_payloads(spec, failure=False)
+
+    if fixture_name == "connector_failure.json":
+        payload["connectors"] = _build_connector_payloads(spec, failure=True)
+
+    return payload
+
+
 def render_fixture_payloads(spec: NormalizedSkillSpec) -> dict[str, str]:
     first_connector = sorted(spec.connectors.keys())[0] if spec.connectors else "unknown_connector"
     context = {
@@ -50,7 +123,14 @@ def render_fixture_payloads(spec: NormalizedSkillSpec) -> dict[str, str]:
     for template_path in sorted(FIXTURE_TEMPLATE_DIR.glob("*.json")):
         template = template_path.read_text(encoding="utf-8")
         content = _replace_tokens(template, **context)
-        normalized = json.dumps(json.loads(content), indent=2, sort_keys=False) + "\n"
+        payload = json.loads(content)
+        if isinstance(payload, dict):
+            payload = _with_harness_metadata(
+                fixture_name=template_path.name,
+                payload=payload,
+                spec=spec,
+            )
+        normalized = json.dumps(payload, indent=2, sort_keys=False) + "\n"
         rendered[template_path.name] = normalized
     return rendered
 

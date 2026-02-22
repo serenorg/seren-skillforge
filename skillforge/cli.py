@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import typer
 
+from skillforge.commands import generate as generate_command
 from skillforge.commands import init as init_command
 from skillforge.commands import test as test_command
+from skillforge.commands import validate as validate_command
 
 app = typer.Typer(
     name="skillforge",
@@ -29,6 +31,8 @@ def version() -> None:
 
 
 app.command("init")(init_command.command)
+app.command("validate")(validate_command.command)
+app.command("generate")(generate_command.command)
 app.command("test")(test_command.command)
 
 
