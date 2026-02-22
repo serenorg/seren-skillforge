@@ -5,6 +5,7 @@ from __future__ import annotations
 import typer
 
 from skillforge.commands import init as init_command
+from skillforge.commands import test as test_command
 
 app = typer.Typer(
     name="skillforge",
@@ -28,6 +29,7 @@ def version() -> None:
 
 
 app.command("init")(init_command.command)
+app.command("test")(test_command.command)
 
 
 if __name__ == "__main__":
