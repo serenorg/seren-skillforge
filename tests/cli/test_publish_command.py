@@ -6,6 +6,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from skillforge.cli import app
+from skillforge.commands import publish as publish_command
 
 runner = CliRunner()
 
@@ -135,3 +136,81 @@ def test_publish_create_pr_fails_clearly_when_gh_missing(tmp_path: Path) -> None
 
     assert result.exit_code != 0
     assert "gh CLI" in result.output
+
+
+class _RecordingShell(publish_command.ShellAdapter):
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def run(self, args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        self.calls.append(args)
+        if args[:4] == ["git", "diff", "--cached", "--quiet"]:
+            # non-zero means changes are staged
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="")
+        if args[:3] == ["gh", "pr", "create"]:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout="https://github.com/serenorg/seren-skills/pull/1\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+
+def test_publish_create_pr_uses_conventional_pr_and_commit_messages(tmp_path: Path) -> None:
+    source = _create_generated_source(tmp_path)
+    target_repo = tmp_path / "seren-skills"
+    target_repo.mkdir()
+    _init_git_repo(target_repo)
+
+    shell = _RecordingShell()
+    destination, pr_url = publish_command.run(
+        source=source,
+        target=target_repo,
+        org="curve",
+        name="gauge-reward-screener",
+        force=False,
+        create_pr=True,
+        base_branch="main",
+        branch_name="skillforge/test-pr-title",
+        change_type="feat",
+        scope=None,
+        shell=shell,
+    )
+
+    assert destination.exists()
+    assert pr_url == "https://github.com/serenorg/seren-skills/pull/1"
+
+    commit_call = next(call for call in shell.calls if call[:1] == ["git"] and "commit" in call)
+    assert commit_call[-1] == "feat: publish skill curve/gauge-reward-screener via SkillForge"
+
+    pr_call = next(call for call in shell.calls if call[:3] == ["gh", "pr", "create"])
+    title_index = pr_call.index("--title") + 1
+    assert pr_call[title_index] == "feat: publish skill curve/gauge-reward-screener"
+
+
+def test_publish_rejects_unknown_conventional_change_type(tmp_path: Path) -> None:
+    source = _create_generated_source(tmp_path)
+    target_repo = tmp_path / "seren-skills"
+    target_repo.mkdir()
+    _init_git_repo(target_repo)
+
+    result = runner.invoke(
+        app,
+        [
+            "publish",
+            "--source",
+            str(source),
+            "--target",
+            str(target_repo),
+            "--org",
+            "curve",
+            "--name",
+            "gauge-reward-screener",
+            "--change-type",
+            "perf",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Unsupported --change-type" in result.output

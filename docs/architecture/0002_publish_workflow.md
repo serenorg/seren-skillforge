@@ -31,9 +31,26 @@ When `--create-pr` is enabled:
 
 Failures from git/gh commands are surfaced with actionable error text.
 
+### Conventional Format Guardrail
+
+The generated commit message and PR title must satisfy `seren-skills/.github/workflows/pr-title.yml`.
+
+- Allowed conventional types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`
+- Default type in SkillForge publish flow: `feat`
+- Optional scope can be supplied with `--scope`
+
+Defaults:
+
+- Commit: `<type>(<scope>)?: publish skill <org>/<name> via SkillForge`
+- PR title: `<type>(<scope>)?: publish skill <org>/<name>`
+
+Examples:
+
+- `feat: publish skill curve/gauge-reward-screener`
+- `docs(curve): publish skill curve/gauge-reward-screener`
+
 ## Non-Goals
 
 - remote repository setup
 - branch protection enforcement
 - reviewer assignment automation
-
