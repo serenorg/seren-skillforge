@@ -1,0 +1,13 @@
+skill: hello-skill
+description: Minimal SkillSpec example used for schema validation.
+triggers:
+  - hello skill
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+workflow:
+  steps:
+    - id: announce
+      use: transform.echo
+      with:
+        message: hello

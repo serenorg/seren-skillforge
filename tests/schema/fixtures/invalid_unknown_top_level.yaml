@@ -1,0 +1,12 @@
+skill: invalid-top-level
+description: Contains unsupported top-level key.
+triggers:
+  - invalid
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+workflow:
+  steps:
+    - id: step_one
+      use: transform.echo
+extra_field_not_allowed: true

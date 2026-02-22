@@ -1,0 +1,322 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://serenorg.github.io/skillforge/schema/skillspec_v0.json",
+  "title": "SkillSpec v0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "skill",
+    "description",
+    "triggers",
+    "runtime",
+    "workflow"
+  ],
+  "properties": {
+    "skill": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "triggers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtime"
+    },
+    "workflow": {
+      "$ref": "#/$defs/workflow"
+    },
+    "inputs": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/inputDefinition"
+      }
+    },
+    "secrets": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9_]*$"
+      }
+    },
+    "connectors": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/connectorDefinition"
+      }
+    },
+    "state": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/stateDefinition"
+      }
+    },
+    "policies": {
+      "$ref": "#/$defs/policies"
+    },
+    "tests": {
+      "$ref": "#/$defs/tests"
+    },
+    "publish": {
+      "$ref": "#/$defs/publish"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "language",
+        "entrypoint"
+      ],
+      "properties": {
+        "language": {
+          "type": "string",
+          "enum": [
+            "python"
+          ]
+        },
+        "entrypoint": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "inputDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "string",
+            "number",
+            "integer",
+            "boolean"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "default": {},
+        "enum": {
+          "type": "array",
+          "minItems": 1
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        }
+      }
+    },
+    "connectorDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "seren_publisher"
+          ]
+        },
+        "publisher": {
+          "type": "string",
+          "minLength": 1
+        },
+        "base_path": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "seren_publisher"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "publisher"
+            ]
+          }
+        }
+      ]
+    },
+    "stateDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "sqlite",
+            "postgres",
+            "serendb"
+          ]
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "database": {
+          "type": "string",
+          "minLength": 1
+        },
+        "table": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "policies": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dry_run_default": {
+          "type": "boolean"
+        },
+        "idempotency_required": {
+          "type": "boolean"
+        },
+        "max_daily_spend_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max_notional_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max_slippage_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "steps"
+      ],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/workflowStep"
+          }
+        }
+      }
+    },
+    "workflowStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "use"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "use": {
+          "type": "string",
+          "minLength": 1
+        },
+        "with": {
+          "type": "object"
+        }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "quick": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "smoke": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "live": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "publish": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "org",
+        "slug"
+      ],
+      "properties": {
+        "org": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "slug": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        }
+      }
+    }
+  }
+}

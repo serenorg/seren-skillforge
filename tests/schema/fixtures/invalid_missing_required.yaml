@@ -1,0 +1,4 @@
+skill: invalid-skill
+description: Missing workflow and runtime.
+triggers:
+  - invalid
