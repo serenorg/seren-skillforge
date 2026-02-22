@@ -1,0 +1,12 @@
+{
+  "connectors": [
+    "market_data",
+    "model"
+  ],
+  "dry_run": true,
+  "inputs": {
+    "bankroll_usd": 500,
+    "top_n": 5
+  },
+  "skill": "polymarket-trader"
+}
