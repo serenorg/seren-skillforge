@@ -1,0 +1,8 @@
+skill: broken-yaml
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+workflow
+  steps:
+    - id: one
+      use: transform.echo
