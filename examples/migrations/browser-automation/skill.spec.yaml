@@ -1,0 +1,52 @@
+skill: browser-automation
+description: Automate browser navigation and extract structured page content.
+triggers:
+  - take a screenshot
+  - scrape structured page data
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+inputs:
+  url:
+    type: string
+    description: Target URL to visit.
+  screenshot_name:
+    type: string
+    default: capture.png
+secrets:
+  - SEREN_API_KEY
+connectors:
+  browser:
+    kind: seren_publisher
+    publisher: playwright
+  extractor:
+    kind: seren_publisher
+    publisher: seren-models
+policies:
+  dry_run_default: true
+  idempotency_required: true
+workflow:
+  steps:
+    - id: navigate
+      use: connector.browser.navigate
+      with:
+        url: "{url}"
+    - id: screenshot
+      use: connector.browser.screenshot
+      with:
+        name: "{screenshot_name}"
+    - id: extract
+      use: connector.extractor.post
+      with:
+        path: /extract
+        body_from: navigate
+tests:
+  quick:
+    - validates_required_url
+  smoke:
+    - captures_fixture_page
+publish:
+  org: seren
+  slug: browser-automation
+metadata:
+  category: automation

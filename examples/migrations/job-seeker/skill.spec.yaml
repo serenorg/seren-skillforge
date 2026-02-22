@@ -1,0 +1,69 @@
+skill: job-seeker
+description: Find relevant roles and draft tailored application materials.
+triggers:
+  - find me jobs
+  - draft a job application plan
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+inputs:
+  query:
+    type: string
+    default: software engineer
+  location:
+    type: string
+    default: remote
+  top_n:
+    type: integer
+    min: 1
+    max: 20
+    default: 5
+secrets:
+  - SEREN_API_KEY
+connectors:
+  jobs:
+    kind: seren_publisher
+    publisher: jobs-api
+  model:
+    kind: seren_publisher
+    publisher: seren-models
+state:
+  applications:
+    kind: sqlite
+    file: state/applications.db
+policies:
+  dry_run_default: true
+  idempotency_required: true
+workflow:
+  steps:
+    - id: fetch_jobs
+      use: connector.jobs.get
+      with:
+        path: /search
+        query: "{query}"
+        location: "{location}"
+    - id: rank_jobs
+      use: connector.model.post
+      with:
+        path: /rank
+        body_from: fetch_jobs
+    - id: shortlist
+      use: transform.top_n
+      with:
+        n: "{top_n}"
+        from_step: rank_jobs
+    - id: draft_application
+      use: connector.model.post
+      with:
+        path: /draft
+        body_from: shortlist
+tests:
+  quick:
+    - validates_query_defaults
+  smoke:
+    - ranks_jobs_from_fixture
+publish:
+  org: seren
+  slug: job-seeker
+metadata:
+  category: productivity
