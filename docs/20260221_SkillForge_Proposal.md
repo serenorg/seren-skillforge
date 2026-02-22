@@ -70,7 +70,7 @@ The current Markdown + Python approach is flexible but not throughput-optimized.
 - Keep high-level skill intent in `skill.spec.yaml` and generate downstream artifacts.
 
 4. Safety and operations defaults
-- Require explicit policy declarations (budget caps, dry-run defaults, jurisdiction restrictions).
+- Require explicit policy declarations (budget caps, dry-run defaults, provider policy compliance settings).
 
 5. Compatibility
 - Emit outputs aligned with current `seren-skills` repository conventions.
@@ -203,7 +203,7 @@ state:
 policies:
   dry_run_default: true
   max_daily_spend_usd: 25
-  deny_jurisdictions: [US]
+  provider_policy_enforcement: upstream
 
 workflow:
   steps:
@@ -316,7 +316,7 @@ Optional generated references:
 - typed wrappers for defined connectors
 
 4. `policy.py`
-- budget/jurisdiction/idempotency checks
+- budget/provider-policy/idempotency checks
 
 5. `observability.py`
 - structured logs, metrics events, and trace IDs
@@ -371,7 +371,7 @@ Required for risk archetypes (trader/autonomous):
 - `dry_run_default: true`
 - explicit live enable switch
 - explicit spending limits
-- explicit restricted jurisdictions list
+- explicit provider policy enforcement mode
 
 ### 10.2 Secrets Handling
 
