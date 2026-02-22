@@ -1,0 +1,24 @@
+skill: browser-automation-template
+description: Browser automation skill template with capture and extraction flow.
+triggers:
+  - automate browser
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+connectors:
+  playwright:
+    kind: seren_publisher
+    publisher: playwright
+workflow:
+  steps:
+    - id: navigate
+      use: connector.playwright.navigate
+      with:
+        url: https://example.com
+    - id: screenshot
+      use: connector.playwright.screenshot
+      with:
+        name: capture.png
+publish:
+  org: seren
+  slug: browser-automation-template

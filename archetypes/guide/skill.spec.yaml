@@ -1,0 +1,14 @@
+skill: guide-template
+description: Guide-style skill for procedural instructions.
+triggers:
+  - help with process
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+workflow:
+  steps:
+    - id: respond
+      use: transform.render_guide
+publish:
+  org: seren
+  slug: guide-template

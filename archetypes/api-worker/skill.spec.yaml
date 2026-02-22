@@ -1,0 +1,24 @@
+skill: api-worker-template
+description: API orchestration skill with deterministic workflow steps.
+triggers:
+  - run api workflow
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+connectors:
+  primary:
+    kind: seren_publisher
+    publisher: example-publisher
+workflow:
+  steps:
+    - id: fetch
+      use: connector.primary.get
+      with:
+        path: /health
+    - id: transform
+      use: transform.map
+      with:
+        body_from: fetch
+publish:
+  org: seren
+  slug: api-worker-template
