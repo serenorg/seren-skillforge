@@ -1,0 +1,7 @@
+{
+  "status": "ok",
+  "skill": "{{skill_name}}",
+  "dry_run": true,
+  "blocked_action": "live_execution"
+}
+

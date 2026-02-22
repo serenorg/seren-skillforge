@@ -1,0 +1,8 @@
+{
+  "status": "error",
+  "skill": "{{skill_name}}",
+  "error_code": "connector_failure",
+  "connector": "{{first_connector}}",
+  "message": "Connector call failed during smoke test."
+}
+

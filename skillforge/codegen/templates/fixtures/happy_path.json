@@ -1,0 +1,7 @@
+{
+  "status": "ok",
+  "skill": "{{skill_name}}",
+  "workflow_step_count": {{workflow_step_count}},
+  "dry_run": {{dry_run}}
+}
+
