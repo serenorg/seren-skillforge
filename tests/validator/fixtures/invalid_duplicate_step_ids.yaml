@@ -1,0 +1,13 @@
+skill: api-worker
+description: Duplicate workflow step IDs.
+triggers:
+  - run api workflow
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+workflow:
+  steps:
+    - id: fetch
+      use: transform.echo
+    - id: fetch
+      use: transform.summary

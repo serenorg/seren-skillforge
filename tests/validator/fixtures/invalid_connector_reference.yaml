@@ -1,0 +1,13 @@
+skill: api-worker
+description: Step references missing connector.
+triggers:
+  - run api workflow
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+workflow:
+  steps:
+    - id: fetch
+      use: connector.curve.get
+      with:
+        path: /getAllGauges

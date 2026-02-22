@@ -1,0 +1,14 @@
+skill: curve-trader
+description: Risk skill without budget cap.
+triggers:
+  - run trading strategy
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+policies:
+  dry_run_default: true
+  idempotency_required: true
+workflow:
+  steps:
+    - id: rank
+      use: transform.rank

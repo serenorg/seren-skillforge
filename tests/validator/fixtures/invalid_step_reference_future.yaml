@@ -1,0 +1,15 @@
+skill: api-worker
+description: Step references a future step.
+triggers:
+  - run api workflow
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+workflow:
+  steps:
+    - id: summarize
+      use: transform.summary
+      with:
+        body_from: fetch
+    - id: fetch
+      use: transform.echo

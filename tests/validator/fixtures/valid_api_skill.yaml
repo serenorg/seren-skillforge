@@ -1,0 +1,21 @@
+skill: api-worker
+description: Valid non-risk workflow.
+triggers:
+  - run api workflow
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+connectors:
+  curve:
+    kind: seren_publisher
+    publisher: curve-finance
+workflow:
+  steps:
+    - id: fetch
+      use: connector.curve.get
+      with:
+        path: /getAllGauges
+    - id: summarize
+      use: transform.summary
+      with:
+        body_from: fetch

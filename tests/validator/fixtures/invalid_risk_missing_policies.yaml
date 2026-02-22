@@ -1,0 +1,13 @@
+skill: curve-trader
+description: Risk skill without safety policies.
+triggers:
+  - run trading strategy
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+metadata:
+  category: trading
+workflow:
+  steps:
+    - id: rank
+      use: transform.rank
