@@ -1,0 +1,12 @@
+{
+  "skill": "ledger-signing",
+  "dry_run": true,
+  "inputs": {
+    "signing_mode": "auto",
+    "app_name": "Ethereum",
+    "payload_kind": "transaction",
+    "request_summary": "Send 0.001 ETH to known recipient",
+    "clear_sign_required": true,
+    "blind_sign_allowed": false
+  }
+}

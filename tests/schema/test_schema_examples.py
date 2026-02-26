@@ -12,6 +12,7 @@ VALID_EXAMPLES = [
     REPO_ROOT / "examples/minimal/skill.spec.yaml",
     REPO_ROOT / "examples/browser-automation/skill.spec.yaml",
     REPO_ROOT / "examples/polymarket-trader/skill.spec.yaml",
+    REPO_ROOT / "examples/customer-support-intake/skill.spec.yaml",
 ]
 INVALID_FIXTURES = [
     REPO_ROOT / "tests/schema/fixtures/invalid_missing_required.yaml",
@@ -51,4 +52,3 @@ def test_invalid_fixtures_fail_schema() -> None:
     joined = " | ".join(failing_messages)
     assert "is a required property" in joined
     assert "Additional properties are not allowed" in joined
-

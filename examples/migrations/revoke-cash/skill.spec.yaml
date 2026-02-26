@@ -1,0 +1,84 @@
+skill: revoke-cash
+description: Inspect wallet approvals, rank spender risk, and produce a safe revoke plan across EVM chains.
+triggers:
+  - check wallet approvals
+  - revoke risky token allowances
+  - review spender risk before signing
+  - revoke cash
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+inputs:
+  wallet_address:
+    type: string
+    description: Wallet address to analyze.
+  chain_id:
+    type: integer
+    description: EVM chain ID to inspect.
+    default: 1
+  max_revoke_count:
+    type: integer
+    min: 1
+    max: 200
+    default: 25
+  include_signatures:
+    type: boolean
+    description: Include permit/session signature revocations in the plan.
+    default: true
+  include_delegations:
+    type: boolean
+    description: Include wallet/contract delegation revocations in the plan.
+    default: true
+secrets:
+  - SEREN_API_KEY
+connectors:
+  revoke:
+    kind: seren_publisher
+    publisher: revoke-cash
+policies:
+  dry_run_default: true
+  idempotency_required: true
+  max_daily_spend_usd: 20
+workflow:
+  steps:
+    - id: get_chain_head
+      use: connector.revoke.get
+      with:
+        path: /api/{chain_id}/block
+    - id: fetch_allowance_events
+      use: connector.revoke.post
+      with:
+        path: /api/{chain_id}/logs
+        wallet_address: "{wallet_address}"
+        from_step: get_chain_head
+    - id: classify_allowances
+      use: transform.rank
+      with:
+        from_step: fetch_allowance_events
+    - id: select_revoke_targets
+      use: transform.top_n
+      with:
+        n: "{max_revoke_count}"
+        from_step: classify_allowances
+    - id: compose_revoke_plan
+      use: transform.create_plan
+      with:
+        include_signatures: "{include_signatures}"
+        include_delegations: "{include_delegations}"
+        from_step: select_revoke_targets
+    - id: record_batch_revoke
+      use: connector.revoke.post
+      with:
+        path: /api/{chain_id}/batch-revoke
+        body_from: compose_revoke_plan
+tests:
+  quick:
+    - validates_wallet_and_chain_inputs
+  smoke:
+    - builds_revoke_plan_from_fixture
+    - dry_run_never_submits_live_revoke
+publish:
+  org: seren
+  slug: revoke-cash
+metadata:
+  category: security

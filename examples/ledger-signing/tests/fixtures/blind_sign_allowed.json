@@ -1,0 +1,12 @@
+{
+  "skill": "ledger-signing",
+  "dry_run": true,
+  "inputs": {
+    "signing_mode": "blind",
+    "app_name": "Ethereum",
+    "payload_kind": "typed_data",
+    "request_summary": "Sign typed data not fully decodable on-device",
+    "clear_sign_required": false,
+    "blind_sign_allowed": true
+  }
+}

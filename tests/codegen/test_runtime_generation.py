@@ -66,3 +66,15 @@ def test_render_agent_defaults_to_dry_run_when_policy_missing() -> None:
     spec = parse_spec(REPO_ROOT / "examples/minimal/skill.spec.yaml").ir
     generated = render_agent_py(spec)
     assert "DEFAULT_DRY_RUN = True" in generated
+
+
+def test_render_agent_for_ledger_signing_contains_hid_signing_runtime() -> None:
+    spec = parse_spec(REPO_ROOT / "examples/ledger-signing/skill.spec.yaml").ir
+    generated = render_agent_py(spec)
+
+    assert "Generated SkillForge Ledger runtime for ledger-signing." in generated
+    assert "from ledgerblue.comm import getDongle" in generated
+    assert "INS_SIGN_TX = 0x04" in generated
+    assert "INS_SIGN_PERSONAL_MESSAGE = 0x08" in generated
+    assert '"--execute"' in generated
+    assert "inputs.payload_hex is required for HID signing" in generated

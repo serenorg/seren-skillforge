@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -14,6 +15,9 @@ REQUIRED_SOURCE_FILES = (
     Path("tests/test_smoke.py"),
 )
 ALLOWED_CHANGE_TYPES = {"feat", "fix", "docs", "chore", "refactor", "test"}
+CONVENTIONAL_SUBJECT_RE = re.compile(
+    r"^(feat|fix|docs|chore|refactor|test)(\([^)]+\))?: .+"
+)
 
 
 class PublishError(Exception):
@@ -101,6 +105,17 @@ def _semantic_prefix(change_type: str, scope: str | None) -> str:
     return normalized_type
 
 
+def _require_conventional_subject(subject: str, *, label: str) -> None:
+    normalized = subject.strip()
+    if CONVENTIONAL_SUBJECT_RE.match(normalized):
+        return
+    allowed = ", ".join(sorted(ALLOWED_CHANGE_TYPES))
+    raise PublishError(
+        f"{label} must follow conventional format '<type>(<scope>)?: <summary>' "
+        f"with type in [{allowed}]. Got: {subject!r}"
+    )
+
+
 def _default_commit_message(
     *,
     change_type: str,
@@ -148,6 +163,8 @@ def _create_pr(
         org=org,
         name=name,
     )
+    _require_conventional_subject(commit_message, label="Commit message")
+    _require_conventional_subject(pr_title, label="PR title")
 
     checkout = shell.run(["git", "checkout", "-b", branch], cwd=target)
     if checkout.returncode != 0:
