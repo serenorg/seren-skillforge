@@ -41,3 +41,23 @@ def test_parse_richer_example_keeps_structured_sections() -> None:
     assert result.ir.workflow_steps[-1].id == "plan"
     assert result.ir.publish == {"org": "polymarket", "slug": "trader"}
 
+
+def test_parse_customer_support_example_keeps_connectors_and_state() -> None:
+    result = parse_spec(REPO_ROOT / "examples/customer-support-intake/skill.spec.yaml")
+
+    assert result.ir.skill == "customer-support-intake"
+    assert result.ir.connectors["diagnostics"]["publisher"] == "seren-desktop-diagnostics"
+    assert result.ir.connectors["playwright"]["publisher"] == "playwright-local-mcp"
+    assert result.ir.connectors["storage"]["publisher"] == "serendb"
+    assert result.ir.connectors["discord"]["publisher"] == "discord"
+    assert result.ir.state["incidents"]["kind"] == "serendb"
+    assert result.ir.state["incidents"]["database"] == "support_intake"
+    assert "support_org_id" not in result.ir.inputs
+    assert "support_access_grant_token" not in result.ir.inputs
+    assert "consent_confirmed" in result.ir.inputs
+    assert "bot_display_name" in result.ir.inputs
+    assert "discord_username" in result.ir.inputs
+    assert "incident_url" in result.ir.inputs
+    assert "include_screenshot" in result.ir.inputs
+    assert result.ir.workflow_steps[0].id == "verify_consent"
+    assert result.ir.workflow_steps[-1].id == "summary"

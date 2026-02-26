@@ -5,6 +5,9 @@ from pathlib import Path
 from skillforge.ir import NormalizedSkillSpec
 
 TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "agent.py.j2"
+LEDGER_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent / "templates" / "agent_ledger_signing.py.j2"
+)
 
 
 def _as_python_bool(value: bool) -> str:
@@ -12,7 +15,10 @@ def _as_python_bool(value: bool) -> str:
 
 
 def render_agent_py(spec: NormalizedSkillSpec) -> str:
-    template = TEMPLATE_PATH.read_text(encoding="utf-8")
+    template_path = TEMPLATE_PATH
+    if spec.skill == "ledger-signing":
+        template_path = LEDGER_TEMPLATE_PATH
+    template = template_path.read_text(encoding="utf-8")
     default_dry_run = bool(spec.policies.get("dry_run_default", True))
     connectors = sorted(spec.connectors.keys())
     connector_repr = ", ".join(repr(name) for name in connectors)
@@ -34,4 +40,3 @@ def write_runtime_python(spec: NormalizedSkillSpec, output_dir: Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(render_agent_py(spec), encoding="utf-8")
     return output_path
-

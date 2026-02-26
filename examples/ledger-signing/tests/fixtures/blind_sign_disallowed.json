@@ -1,0 +1,12 @@
+{
+  "skill": "ledger-signing",
+  "dry_run": true,
+  "inputs": {
+    "signing_mode": "blind",
+    "app_name": "Ethereum",
+    "payload_kind": "message",
+    "request_summary": "Attempt blind-sign flow while policy forbids it",
+    "clear_sign_required": true,
+    "blind_sign_allowed": false
+  }
+}

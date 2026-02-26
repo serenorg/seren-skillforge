@@ -1,0 +1,267 @@
+skill: customer-support-intake
+description: One-click customer support intake for SerenDesktop incidents. Use when users report failures and need automatic collection of logs, environment details (from About SerenDesktop), network diagnostics, chat history, and screenshots with built-in consent, automatic redaction, incident registration, and TicketTool.xyz ticket creation via Discord command dispatch.
+triggers:
+  - collect support logs for seren desktop
+  - package customer incident evidence
+  - capture screenshot and diagnostics for support
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+inputs:
+  customer_id:
+    type: string
+    description: Stable customer identifier from auth context. Users are not prompted for this field.
+  incident_id:
+    type: string
+    description: Optional support incident identifier. If omitted, intake registers one automatically.
+  bot_display_name:
+    type: string
+    description: Optional customer-defined bot display name. If omitted, default to "{server_name} Support Bot".
+  discord_username:
+    type: string
+    description: Discord username for ticket mention (without @ preferred). If omitted, use auth context mapping.
+  consent_confirmed:
+    type: boolean
+    description: Set true only after user clicks "Collect and send diagnostics to support".
+    default: false
+  include_logs:
+    type: boolean
+    default: true
+  include_chat_history:
+    type: boolean
+    default: true
+  include_screenshot:
+    type: boolean
+    description: Capture screenshot from incident view. UI should default to enabled and allow opt-out.
+    default: true
+  incident_url:
+    type: string
+    description: Optional local incident page URL. If omitted, collector falls back to the active view.
+  lookback_hours:
+    type: integer
+    min: 1
+    max: 168
+    default: 24
+  retention_days:
+    type: integer
+    min: 7
+    max: 365
+    default: 30
+secrets:
+  - SEREN_API_KEY
+  - SUPPORT_INGEST_SIGNING_KEY
+  - DISCORD_BOT_TOKEN
+connectors:
+  diagnostics:
+    kind: seren_publisher
+    publisher: seren-desktop-diagnostics
+  playwright:
+    kind: seren_publisher
+    publisher: playwright-local-mcp
+  storage:
+    kind: seren_publisher
+    publisher: serendb
+  discord:
+    kind: seren_publisher
+    publisher: discord
+state:
+  incidents:
+    kind: serendb
+    database: support_intake
+    table: customer_incidents
+policies:
+  dry_run_default: true
+  idempotency_required: true
+  max_daily_spend_usd: 10
+workflow:
+  steps:
+    - id: verify_consent
+      use: transform.assert_consent
+      with:
+        customer_id: "{customer_id}"
+        incident_id: "{incident_id}"
+        consent_confirmed: "{consent_confirmed}"
+        prompt: Share diagnostics and screenshot with Seren support now?
+        action_label: Collect and send
+        deny_message: Support intake cancelled because consent was not granted.
+    - id: verify_support_org_db_access
+      use: connector.storage.post
+      with:
+        path: /support/access/verify-default-context
+        body:
+          support_org_id_source: auth_context
+          expected_support_org_id: f7f18722-a9c0-4cfe-bc2e-366463bb69bb
+          require_auth_context: true
+          fail_on_org_mismatch: true
+          step: verify_consent
+    - id: register_incident
+      use: connector.storage.post
+      with:
+        path: /support/incidents/register
+        body:
+          step: verify_support_org_db_access
+          customer_id: "{customer_id}"
+          incident_id: "{incident_id}"
+          source: seren-desktop
+          auto_create_if_missing: true
+    - id: collect_environment
+      use: connector.diagnostics.post
+      with:
+        path: /collect/environment
+        body:
+          customer_id: "{customer_id}"
+          incident_id: "{incident_id}"
+          source: about-serendesktop
+          include_network_checks: true
+          step: verify_consent
+    - id: collect_logs
+      use: connector.diagnostics.post
+      with:
+        path: /collect/logs
+        body:
+          customer_id: "{customer_id}"
+          incident_id: "{incident_id}"
+          include_logs: "{include_logs}"
+          lookback_hours: "{lookback_hours}"
+          step: verify_consent
+    - id: collect_chat_history
+      use: connector.diagnostics.post
+      with:
+        path: /collect/chat-history
+        body:
+          customer_id: "{customer_id}"
+          incident_id: "{incident_id}"
+          include_chat_history: "{include_chat_history}"
+          lookback_hours: "{lookback_hours}"
+          step: verify_consent
+    - id: open_incident_view
+      use: connector.playwright.post
+      with:
+        path: /_mcp/tools/playwright_navigate
+        body:
+          url: "{incident_url}"
+          fallback_to_active_view: true
+    - id: capture_screenshot
+      use: connector.playwright.post
+      with:
+        path: /_mcp/tools/playwright_screenshot
+        body:
+          name: "incident-{incident_id}.png"
+          full_page: true
+          include_screenshot: "{include_screenshot}"
+          from_step: open_incident_view
+    - id: redact_and_minimize
+      use: transform.redact_sensitive
+      with:
+        depends_on:
+          - register_incident
+          - collect_environment
+          - collect_logs
+          - collect_chat_history
+          - open_incident_view
+          - capture_screenshot
+        redact:
+          - access_token
+          - refresh_token
+          - api_key
+          - private_key
+          - cookie
+          - authorization
+          - password
+          - ssn
+          - credit_card
+          - email
+          - phone
+          - account_id
+          - wallet_address
+    - id: hash_payload
+      use: transform.hash_payload
+      with:
+        from_step: redact_and_minimize
+        algorithm: sha256
+    - id: upsert_incident
+      use: connector.storage.post
+      with:
+        path: /support/incidents/upsert
+        body:
+          step: verify_support_org_db_access
+          customer_id: "{customer_id}"
+          incident_id: "{incident_id}"
+          registration_from: register_incident
+          body_from: hash_payload
+    - id: persist_evidence
+      use: connector.storage.post
+      with:
+        path: /support/evidence/upload
+        body:
+          step: verify_support_org_db_access
+          incident_id: "{incident_id}"
+          body_from: redact_and_minimize
+    - id: enqueue_tickettool_command
+      use: connector.discord.post
+      with:
+        path: /channels/1447063573804355687/messages
+        body:
+          step: verify_support_org_db_access
+          incident_id: "{incident_id}"
+          channel_id: "1447063573804355687"
+          destination: tickettool_xyz
+          bot_display_name: "{bot_display_name}"
+          command_template: "$new @{discord_username} {reason}"
+          reason_from: persist_evidence
+          body_hash_from: hash_payload
+          oauth_install_url: "https://discord.com/oauth2/authorize?client_id=1476455052209160234&permissions=67584&integration_type=0&scope=bot"
+    - id: persist_ticket_mapping
+      use: connector.storage.post
+      with:
+        path: /support/incidents/ticket-link
+        body:
+          step: verify_support_org_db_access
+          incident_id: "{incident_id}"
+          ticket_provider: tickettool_xyz
+          ticket_from: enqueue_tickettool_command
+    - id: set_retention
+      use: connector.storage.post
+      with:
+        path: /support/incidents/retention
+        body:
+          step: verify_support_org_db_access
+          incident_id: "{incident_id}"
+          retention_days: "{retention_days}"
+    - id: summary
+      use: transform.support_summary
+      with:
+        depends_on:
+          - upsert_incident
+          - persist_evidence
+          - enqueue_tickettool_command
+          - persist_ticket_mapping
+          - set_retention
+tests:
+  quick:
+    - validates_consent_required
+    - validates_default_retention
+    - validates_lookback_bounds
+  smoke:
+    - collects_logs_and_chat_fixture
+    - captures_playwright_screenshot_fixture
+    - redacts_and_stores_fixture
+publish:
+  org: seren
+  slug: customer-support-intake
+metadata:
+  category: support
+  data_sensitivity: high
+  support_org_db_access_required: "true"
+  support_org_id_source: auth_context
+  pinned_support_org_id: f7f18722-a9c0-4cfe-bc2e-366463bb69bb
+  fail_on_non_pinned_org_id: "true"
+  customer_db_access_model: auth_context_with_pinned_support_org
+  screenshot_capture: enabled_by_default_with_opt_out
+  redaction_mode: automatic_default
+  ticketing_backend: tickettool_xyz_discord_command
+  support_alerting: discord_tickettool_channel_command
+  ticket_channel_id: "1447063573804355687"
+  discord_oauth_install_url: "https://discord.com/oauth2/authorize?client_id=1476455052209160234&permissions=67584&integration_type=0&scope=bot"
+  bot_name_policy: user_defined_with_default
+  bot_default_name_template: "{server_name} Support Bot"

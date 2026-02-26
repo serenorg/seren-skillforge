@@ -1,0 +1,99 @@
+skill: ledger-signing
+description: Guide Ledger device owners through secure transaction and message signing with explicit support for clear signing and blind signing fallback flows.
+triggers:
+  - ledger signing
+  - clear sign transaction
+  - blind sign transaction
+  - sign message with ledger
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+inputs:
+  signing_mode:
+    type: string
+    description: Preferred signing mode for this operation.
+    enum:
+      - clear
+      - blind
+      - auto
+    default: auto
+  app_name:
+    type: string
+    description: Ledger app used for signing.
+    default: Ethereum
+  payload_kind:
+    type: string
+    description: Type of payload being signed.
+    enum:
+      - transaction
+      - message
+      - typed_data
+    default: transaction
+  request_summary:
+    type: string
+    description: Human-readable summary of what the user wants to sign.
+  derivation_path:
+    type: string
+    description: BIP32 derivation path used for signing on Ledger.
+    default: 44'/60'/0'/0/0
+  payload_hex:
+    type: string
+    description: Hex payload to sign (RLP transaction bytes or UTF-8 message bytes hex-encoded).
+    default: ""
+  clear_sign_required:
+    type: boolean
+    description: Require trusted on-device field display before approval.
+    default: true
+  blind_sign_allowed:
+    type: boolean
+    description: Allow fallback instructions for blind signing.
+    default: true
+policies:
+  dry_run_default: true
+  idempotency_required: true
+workflow:
+  steps:
+    - id: validate_request
+      use: transform.validate_signing_request
+      with:
+        signing_mode: "{signing_mode}"
+        payload_kind: "{payload_kind}"
+        clear_sign_required: "{clear_sign_required}"
+        blind_sign_allowed: "{blind_sign_allowed}"
+    - id: render_clear_signing_flow
+      use: transform.render_ledger_clear_signing_guide
+      with:
+        app_name: "{app_name}"
+        payload_kind: "{payload_kind}"
+        request_summary: "{request_summary}"
+    - id: render_blind_signing_flow
+      use: transform.render_ledger_blind_signing_guide
+      with:
+        app_name: "{app_name}"
+        payload_kind: "{payload_kind}"
+        request_summary: "{request_summary}"
+    - id: render_final_response
+      use: transform.render_dual_signing_response
+      with:
+        mode: "{signing_mode}"
+        include_clear_signing: "{clear_sign_required}"
+        include_blind_signing: "{blind_sign_allowed}"
+tests:
+  quick:
+    - validates_mode_enum_and_defaults
+    - requires_clear_and_blind_paths
+  smoke:
+    - renders_clear_signing_first_when_available
+    - renders_blind_signing_fallback_when_user_allows
+  live:
+    - hitl_clear_signing_displays_human_readable_fields
+    - hitl_blind_signing_requires_explicit_opt_in
+    - hitl_blind_signing_disallowed_blocks_fallback
+publish:
+  org: examples
+  slug: ledger-signing
+metadata:
+  category: wallet-security
+  hitl_test_doc: examples/ledger-signing/HITL_TESTS.md
+  primary_reference: https://developers.ledger.com/docs/device-app/integration/design-guidelines/transactions
+  sdk_reference: https://ledgerhq.github.io/ledger-secure-sdk/nbgl__use__case_8h.html#a303e3242b26535f74695f94a51d8cb6a

@@ -12,6 +12,7 @@ MIGRATION_SPECS = [
     MIGRATIONS_DIR / "browser-automation" / "skill.spec.yaml",
     MIGRATIONS_DIR / "polymarket-trader" / "skill.spec.yaml",
     MIGRATIONS_DIR / "job-seeker" / "skill.spec.yaml",
+    MIGRATIONS_DIR / "revoke-cash" / "skill.spec.yaml",
 ]
 
 
