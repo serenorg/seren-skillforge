@@ -87,7 +87,10 @@ def test_customer_support_spec_redaction_and_state_are_explicit() -> None:
     assert "include_screenshot" in spec.inputs
     assert steps_by_id["upsert_incident"].args["body"]["step"] == "verify_support_org_db_access"
     assert steps_by_id["persist_evidence"].args["body"]["step"] == "verify_support_org_db_access"
-    assert steps_by_id["enqueue_tickettool_command"].args["body"]["step"] == "verify_support_org_db_access"
+    assert (
+        steps_by_id["enqueue_tickettool_command"].args["body"]["step"]
+        == "verify_support_org_db_access"
+    )
     assert steps_by_id["enqueue_tickettool_command"].args["body"]["destination"] == "tickettool_xyz"
     assert steps_by_id["enqueue_tickettool_command"].args["body"]["channel_id"] == TICKET_CHANNEL_ID
     assert (
@@ -102,7 +105,10 @@ def test_customer_support_spec_redaction_and_state_are_explicit() -> None:
         steps_by_id["enqueue_tickettool_command"].args["body"]["oauth_install_url"]
         == DISCORD_OAUTH_URL
     )
-    assert steps_by_id["persist_ticket_mapping"].args["body"]["step"] == "verify_support_org_db_access"
+    assert (
+        steps_by_id["persist_ticket_mapping"].args["body"]["step"]
+        == "verify_support_org_db_access"
+    )
     assert steps_by_id["persist_ticket_mapping"].args["body"]["ticket_provider"] == "tickettool_xyz"
     assert (
         steps_by_id["persist_ticket_mapping"].args["body"]["ticket_from"]

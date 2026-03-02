@@ -32,7 +32,9 @@ def test_ledger_signing_workflow_includes_clear_and_blind_paths() -> None:
 
 def test_ledger_signing_hitl_fixtures_have_expected_policy_modes() -> None:
     clear = json.loads((FIXTURE_DIR / "clear_sign_happy.json").read_text(encoding="utf-8"))
-    blind_allowed = json.loads((FIXTURE_DIR / "blind_sign_allowed.json").read_text(encoding="utf-8"))
+    blind_allowed = json.loads(
+        (FIXTURE_DIR / "blind_sign_allowed.json").read_text(encoding="utf-8")
+    )
     blind_blocked = json.loads(
         (FIXTURE_DIR / "blind_sign_disallowed.json").read_text(encoding="utf-8")
     )
