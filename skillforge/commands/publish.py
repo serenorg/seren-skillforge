@@ -295,7 +295,10 @@ def command(
     change_type: str = typer.Option(
         "feat",
         "--change-type",
-        help="Conventional type for commit message and PR title (feat|fix|docs|chore|refactor|test).",
+        help=(
+            "Conventional type for commit message and PR title "
+            "(feat|fix|docs|chore|refactor|test)."
+        ),
     ),
     scope: str | None = typer.Option(
         None,
