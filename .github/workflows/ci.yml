@@ -27,6 +27,10 @@ jobs:
       - name: Lint
         run: make lint PYTHON=python
 
+      - name: Auth compliance checks
+        run: |
+          python -m skillforge auth-check --path . --json-out artifacts/auth-check.json
+
       - name: Test
         run: make test PYTHON=python
 

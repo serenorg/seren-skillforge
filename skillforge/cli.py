@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typer
 
+from skillforge.commands import auth_check as auth_check_command
 from skillforge.commands import generate as generate_command
 from skillforge.commands import init as init_command
 from skillforge.commands import publish as publish_command
@@ -38,6 +39,7 @@ app.command("generate")(generate_command.command)
 app.command("test")(test_command.command)
 app.command("publish")(publish_command.command)
 app.command("resolve-publishers")(resolve_publishers_command.command)
+app.command("auth-check")(auth_check_command.command)
 
 
 if __name__ == "__main__":

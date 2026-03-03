@@ -9,6 +9,8 @@ from pathlib import Path
 
 import typer
 
+from skillforge.commands import auth_check as auth_check_command
+
 REQUIRED_SOURCE_FILES = (
     Path("SKILL.md"),
     Path("scripts/agent.py"),
@@ -235,6 +237,20 @@ def run(
     shell: ShellAdapter | None = None,
 ) -> tuple[Path, str | None]:
     _ensure_source_layout(source)
+    auth_result = auth_check_command.run(path=source)
+    if not auth_result.ok:
+        preview = "\n".join(
+            f"[{violation.rule_id}] {violation.path}:{violation.line}: {violation.message}"
+            for violation in auth_result.violations[:10]
+        )
+        suffix = ""
+        if len(auth_result.violations) > 10:
+            suffix = f"\n... {len(auth_result.violations) - 10} more violation(s)"
+        raise PublishError(
+            "Auth policy violations detected in source artifacts.\n"
+            f"{preview}{suffix}\n"
+            "Run `skillforge auth-check --path <source>` to inspect all findings."
+        )
     _ensure_target_repo(target)
     _require_gh_cli(create_pr)
     _normalize_change_type(change_type)

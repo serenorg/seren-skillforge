@@ -139,6 +139,36 @@ def test_publish_create_pr_fails_clearly_when_gh_missing(tmp_path: Path) -> None
     assert "gh CLI" in result.output
 
 
+def test_publish_blocks_when_auth_policy_violations_exist(tmp_path: Path) -> None:
+    source = _create_generated_source(tmp_path)
+    (source / "SKILL.md").write_text(
+        "# Skill\n\nRun `export SEREN_API_KEY=...` before starting.\n",
+        encoding="utf-8",
+    )
+    target_repo = tmp_path / "seren-skills"
+    target_repo.mkdir()
+    _init_git_repo(target_repo)
+
+    result = runner.invoke(
+        app,
+        [
+            "publish",
+            "--source",
+            str(source),
+            "--target",
+            str(target_repo),
+            "--org",
+            "curve",
+            "--name",
+            "gauge-reward-screener",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Auth policy violations" in result.output
+    assert "AUTH001" in result.output
+
+
 class _RecordingShell(publish_command.ShellAdapter):
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
