@@ -148,6 +148,8 @@ class _RecordingShell(publish_command.ShellAdapter):
         if args[:4] == ["git", "diff", "--cached", "--quiet"]:
             # non-zero means changes are staged
             return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="")
+        if args[:3] == ["git", "push", "-u"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
         if args[:3] == ["gh", "pr", "create"]:
             return subprocess.CompletedProcess(
                 args=args,
@@ -184,6 +186,9 @@ def test_publish_create_pr_uses_conventional_pr_and_commit_messages(tmp_path: Pa
 
     commit_call = next(call for call in shell.calls if call[:1] == ["git"] and "commit" in call)
     assert commit_call[-1] == "feat: publish skill curve/gauge-reward-screener via SkillForge"
+
+    push_call = next(call for call in shell.calls if call[:3] == ["git", "push", "-u"])
+    assert push_call == ["git", "push", "-u", "origin", "skillforge/test-pr-title"]
 
     pr_call = next(call for call in shell.calls if call[:3] == ["gh", "pr", "create"])
     title_index = pr_call.index("--title") + 1

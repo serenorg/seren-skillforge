@@ -197,6 +197,9 @@ def _create_pr(
     )
     _require_shell_success(commit, action="git commit")
 
+    push = shell.run(["git", "push", "-u", "origin", branch], cwd=target)
+    _require_shell_success(push, action=f"git push -u origin {branch}")
+
     pr = shell.run(
         [
             "gh",
