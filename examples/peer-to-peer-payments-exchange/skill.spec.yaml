@@ -1,0 +1,162 @@
+skill: peer-to-peer-payments-exchange
+description: Route and execute peer-to-peer fiat-to-crypto payment and exchange flows on Peer (ZKP2P), including onramp, offramp, checkout, transfer, LP, vault, analytics, explorer, and activity monitoring paths.
+triggers:
+  - exchange fiat and usdc peer to peer
+  - route p2p payment flow on peer protocol
+  - orchestrate zkp2p checkout onramp offramp transfer
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+inputs:
+  intent:
+    type: string
+    description: User intent key, for example fiat-to-crypto, pay-humans-fiat, accept-fiat-payments, send-usdc, or analyze-peer-protocol.
+    default: check-fx-rates
+  amount_usd:
+    type: number
+    min: 1
+    default: 100
+  fiat_currency:
+    type: string
+    default: USD
+  payment_platform:
+    type: string
+    default: wise
+  live_mode:
+    type: boolean
+    default: false
+  include_analytics:
+    type: boolean
+    default: true
+secrets:
+  - SEREN_API_KEY
+connectors:
+  peer_market:
+    kind: seren_publisher
+    publisher: peer-market
+  peer_checkout:
+    kind: seren_publisher
+    publisher: peer-checkout
+  peer_onramp:
+    kind: seren_publisher
+    publisher: peer-onramp
+  peer_offramp:
+    kind: seren_publisher
+    publisher: peer-offramp
+  peer_transfer:
+    kind: seren_publisher
+    publisher: peer-transfer
+  peer_lp:
+    kind: seren_publisher
+    publisher: peer-lp
+  peer_vault:
+    kind: seren_publisher
+    publisher: peer-vault
+  peer_rate_optimizer:
+    kind: seren_publisher
+    publisher: peer-rate-optimizer
+  peer_analytics:
+    kind: seren_publisher
+    publisher: peer-analytics
+  peer_explorer:
+    kind: seren_publisher
+    publisher: peer-explorer
+  peer_activity:
+    kind: seren_publisher
+    publisher: peer-activity
+  model:
+    kind: seren_publisher
+    publisher: seren-models
+state:
+  sessions:
+    kind: sqlite
+    file: state/peer_p2p_exchange.db
+policies:
+  dry_run_default: true
+  idempotency_required: true
+  max_daily_spend_usd: 50
+  max_notional_usd: 2000
+  max_slippage_bps: 150
+workflow:
+  steps:
+    - id: normalize_request
+      use: transform.normalize_intent
+      with:
+        intent: "{intent}"
+        amount_usd: "{amount_usd}"
+        fiat_currency: "{fiat_currency}"
+        payment_platform: "{payment_platform}"
+    - id: route_intent
+      use: transform.route_intent
+      with:
+        from_step: normalize_request
+        routes:
+          accept-fiat-payments: peer-checkout
+          analyze-peer-protocol: peer-analytics
+          check-fx-rates: peer-market
+          earn-as-defi-manager: peer-vault+peer-rate-optimizer
+          earn-on-idle-usdc: peer-lp
+          fiat-to-crypto: peer-onramp
+          look-up-peer-data: peer-explorer
+          monitor-peer-activity: peer-activity
+          pay-humans-fiat: peer-offramp
+          send-usdc: peer-transfer
+    - id: get_market_quote
+      use: connector.peer_market.get
+      with:
+        path: /quotes
+        amount_usd: "{amount_usd}"
+        fiat_currency: "{fiat_currency}"
+        payment_platform: "{payment_platform}"
+        from_step: route_intent
+    - id: get_protocol_context
+      use: connector.peer_analytics.get
+      with:
+        path: /summary
+        include_analytics: "{include_analytics}"
+        from_step: route_intent
+    - id: lookup_entity_context
+      use: connector.peer_explorer.get
+      with:
+        path: /search
+        from_step: normalize_request
+    - id: build_execution_plan
+      use: connector.model.post
+      with:
+        path: /v1/responses
+        body:
+          route_from: route_intent
+          market_from: get_market_quote
+          protocol_from: get_protocol_context
+          lookup_from: lookup_entity_context
+          live_mode: "{live_mode}"
+    - id: monitor_activity
+      use: connector.peer_activity.get
+      with:
+        path: /events
+        from_step: build_execution_plan
+    - id: summary
+      use: transform.render_guide
+      with:
+        from_step: monitor_activity
+        include_route_map: true
+tests:
+  quick:
+    - validates_intent_default
+    - validates_amount_bounds
+    - validates_safety_caps
+  smoke:
+    - routes_fiat_to_crypto_to_peer_onramp
+    - routes_pay_humans_to_peer_offramp
+    - generates_plan_with_analytics_context
+publish:
+  org: zkp2p
+  slug: peer-to-peer-payments-exchange
+metadata:
+  category: payments
+  protocol: peer-zkp2p
+  upstream_repo: https://github.com/zkp2p/zkp2p-skills
+  referenced_skills_count: "21"
+  referenced_action_skills: accept-fiat-payments,analyze-peer-protocol,check-fx-rates,earn-as-defi-manager,earn-on-idle-usdc,fiat-to-crypto,look-up-peer-data,monitor-peer-activity,pay-humans-fiat,send-usdc
+  referenced_implementation_skills: peer-activity,peer-analytics,peer-checkout,peer-explorer,peer-lp,peer-market,peer-offramp,peer-onramp,peer-rate-optimizer,peer-transfer,peer-vault
+  referenced_all_skills: accept-fiat-payments,analyze-peer-protocol,check-fx-rates,earn-as-defi-manager,earn-on-idle-usdc,fiat-to-crypto,look-up-peer-data,monitor-peer-activity,pay-humans-fiat,send-usdc,peer-activity,peer-analytics,peer-checkout,peer-explorer,peer-lp,peer-market,peer-offramp,peer-onramp,peer-rate-optimizer,peer-transfer,peer-vault

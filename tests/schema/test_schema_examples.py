@@ -13,6 +13,7 @@ VALID_EXAMPLES = [
     REPO_ROOT / "examples/browser-automation/skill.spec.yaml",
     REPO_ROOT / "examples/polymarket-trader/skill.spec.yaml",
     REPO_ROOT / "examples/customer-support-intake/skill.spec.yaml",
+    REPO_ROOT / "examples/peer-to-peer-payments-exchange/skill.spec.yaml",
 ]
 INVALID_FIXTURES = [
     REPO_ROOT / "tests/schema/fixtures/invalid_missing_required.yaml",
