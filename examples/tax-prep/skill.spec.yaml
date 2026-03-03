@@ -1,0 +1,96 @@
+skill: tax-prep
+description: Map Wells Fargo transaction categories to IRS tax line items, calculate estimated quarterly payments, flag deductible expenses, and produce a tax-ready summary with totals per line item.
+triggers:
+  - prepare tax summary from wells fargo data
+  - calculate estimated quarterly taxes
+  - categorize deductible expenses
+runtime:
+  language: python
+  entrypoint: scripts/run.py
+inputs:
+  tax_year:
+    type: integer
+    description: Tax year to prepare for.
+    min: 2020
+    max: 2030
+    default: 2025
+  filing_type:
+    type: string
+    description: Tax filing type.
+    enum:
+      - schedule-c
+      - w2-standard
+    default: schedule-c
+  start:
+    type: string
+    description: Start date (YYYY-MM-DD). Defaults to Jan 1 of tax_year.
+  end:
+    type: string
+    description: End date (YYYY-MM-DD). Defaults to Dec 31 of tax_year.
+  out:
+    type: string
+    default: artifacts/tax-prep
+  skip_persist:
+    type: boolean
+    default: false
+connectors:
+  serendb:
+    kind: seren_publisher
+    publisher: serendb
+state:
+  checkpoints:
+    kind: sqlite
+    file: artifacts/tax-prep/state/checkpoint.json
+policies:
+  dry_run_default: false
+  idempotency_required: true
+workflow:
+  steps:
+    - id: resolve_serendb
+      use: connector.serendb.connect
+    - id: query_transactions
+      use: connector.serendb.query
+      with:
+        tables:
+          - wf_transactions
+          - wf_txn_categories
+    - id: map_tax_line_items
+      use: transform.map_to_tax_lines
+      with:
+        filing_type: "{filing_type}"
+        from_step: query_transactions
+    - id: flag_deductions
+      use: transform.flag_deductible_expenses
+      with:
+        from_step: map_tax_line_items
+    - id: compute_quarterly_estimates
+      use: transform.compute_quarterly_estimates
+      with:
+        tax_year: "{tax_year}"
+        from_step: flag_deductions
+    - id: render_report
+      use: transform.render
+      with:
+        from_step: compute_quarterly_estimates
+    - id: persist_tax_data
+      use: connector.serendb.upsert
+      with:
+        tables:
+          - wf_tax_runs
+          - wf_tax_line_items
+          - wf_tax_estimates
+        from_step: compute_quarterly_estimates
+tests:
+  quick:
+    - validates_tax_year_range
+    - validates_filing_type_enum
+  smoke:
+    - maps_categories_to_schedule_c_lines
+    - flags_deductible_expenses_from_fixture
+    - computes_quarterly_estimates_correctly
+publish:
+  org: seren-skills
+  slug: tax-prep
+metadata:
+  category: finance
+  depends_on: bank-statement-processing

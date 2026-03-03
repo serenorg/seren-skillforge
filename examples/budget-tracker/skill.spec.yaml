@@ -1,0 +1,92 @@
+skill: budget-tracker
+description: Compare actual Wells Fargo spending against user-defined monthly budgets per category, calculate variance, and track budget adherence over time.
+triggers:
+  - compare budget vs actual spending
+  - track my budget adherence
+  - show budget variance by category
+runtime:
+  language: python
+  entrypoint: scripts/run.py
+inputs:
+  months:
+    type: integer
+    min: 1
+    max: 24
+    default: 3
+  start:
+    type: string
+    description: Start date (YYYY-MM-DD). Overrides months if provided.
+  end:
+    type: string
+    description: End date (YYYY-MM-DD). Defaults to today if start is provided.
+  budget_file:
+    type: string
+    description: Path to JSON budget definition file.
+    default: config/budgets.json
+  out:
+    type: string
+    default: artifacts/budget-tracker
+  skip_persist:
+    type: boolean
+    default: false
+connectors:
+  serendb:
+    kind: seren_publisher
+    publisher: serendb
+state:
+  checkpoints:
+    kind: sqlite
+    file: artifacts/budget-tracker/state/checkpoint.json
+policies:
+  dry_run_default: false
+  idempotency_required: true
+workflow:
+  steps:
+    - id: resolve_serendb
+      use: connector.serendb.connect
+    - id: load_budgets
+      use: transform.load_budget_definitions
+      with:
+        budget_file: "{budget_file}"
+    - id: query_actuals
+      use: connector.serendb.query
+      with:
+        tables:
+          - wf_transactions
+          - wf_txn_categories
+          - wf_monthly_summary
+    - id: compute_variance
+      use: transform.compute_budget_variance
+      with:
+        from_step: query_actuals
+        budgets_from: load_budgets
+    - id: compute_adherence_trend
+      use: transform.compute_adherence_trend
+      with:
+        from_step: compute_variance
+    - id: render_report
+      use: transform.render
+      with:
+        from_step: compute_adherence_trend
+    - id: persist_budget_data
+      use: connector.serendb.upsert
+      with:
+        tables:
+          - wf_budgets
+          - wf_budget_periods
+          - wf_budget_variance
+        from_step: compute_variance
+tests:
+  quick:
+    - validates_budget_file_schema
+    - validates_date_range
+  smoke:
+    - computes_variance_from_fixture
+    - flags_over_budget_categories
+    - computes_adherence_trend_correctly
+publish:
+  org: seren-skills
+  slug: budget-tracker
+metadata:
+  category: finance
+  depends_on: bank-statement-processing

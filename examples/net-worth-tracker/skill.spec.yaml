@@ -1,0 +1,90 @@
+skill: net-worth-tracker
+description: Track account balances from Wells Fargo statement data with optional manual asset and liability entries to produce a simplified balance sheet and net worth trajectory over time.
+triggers:
+  - track my net worth over time
+  - generate balance sheet from wells fargo data
+  - show net worth trajectory
+runtime:
+  language: python
+  entrypoint: scripts/run.py
+inputs:
+  months:
+    type: integer
+    min: 1
+    max: 60
+    default: 12
+  start:
+    type: string
+    description: Start date (YYYY-MM-DD). Overrides months if provided.
+  end:
+    type: string
+    description: End date (YYYY-MM-DD). Defaults to today if start is provided.
+  manual_entries_file:
+    type: string
+    description: Path to JSON file with manual asset/liability entries.
+    default: config/manual_entries.json
+  out:
+    type: string
+    default: artifacts/net-worth-tracker
+  skip_persist:
+    type: boolean
+    default: false
+connectors:
+  serendb:
+    kind: seren_publisher
+    publisher: serendb
+state:
+  checkpoints:
+    kind: sqlite
+    file: artifacts/net-worth-tracker/state/checkpoint.json
+policies:
+  dry_run_default: false
+  idempotency_required: true
+workflow:
+  steps:
+    - id: resolve_serendb
+      use: connector.serendb.connect
+    - id: query_balances
+      use: connector.serendb.query
+      with:
+        tables:
+          - wf_statement_files
+          - wf_monthly_summary
+    - id: load_manual_entries
+      use: transform.load_manual_entries
+      with:
+        manual_entries_file: "{manual_entries_file}"
+    - id: compute_balance_sheet
+      use: transform.compute_balance_sheet
+      with:
+        from_step: query_balances
+        manual_from: load_manual_entries
+    - id: compute_net_worth_trajectory
+      use: transform.compute_net_worth_trajectory
+      with:
+        from_step: compute_balance_sheet
+    - id: render_report
+      use: transform.render
+      with:
+        from_step: compute_net_worth_trajectory
+    - id: persist_networth_data
+      use: connector.serendb.upsert
+      with:
+        tables:
+          - wf_networth_entries
+          - wf_networth_snapshots
+        from_step: compute_net_worth_trajectory
+tests:
+  quick:
+    - validates_months_range
+    - validates_manual_entries_schema
+  smoke:
+    - computes_balance_sheet_from_fixture
+    - computes_trajectory_correctly
+    - merges_manual_entries_from_fixture
+publish:
+  org: seren-skills
+  slug: net-worth-tracker
+metadata:
+  category: finance
+  depends_on: bank-statement-processing

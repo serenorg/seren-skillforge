@@ -1,0 +1,103 @@
+skill: recurring-transactions
+description: Identify recurring charges from Wells Fargo transaction data by pattern-matching description, amount, and frequency. Flag subscriptions, bills, and regular income with monthly committed vs discretionary spend.
+triggers:
+  - detect recurring transactions
+  - find my subscriptions and bills
+  - show committed vs discretionary spend
+runtime:
+  language: python
+  entrypoint: scripts/run.py
+inputs:
+  months:
+    type: integer
+    min: 3
+    max: 24
+    default: 12
+  start:
+    type: string
+    description: Start date (YYYY-MM-DD). Overrides months if provided.
+  end:
+    type: string
+    description: End date (YYYY-MM-DD). Defaults to today if start is provided.
+  min_occurrences:
+    type: integer
+    description: Minimum number of occurrences to flag as recurring.
+    min: 2
+    max: 12
+    default: 3
+  amount_tolerance_pct:
+    type: number
+    description: Percentage tolerance for matching similar amounts.
+    min: 0
+    max: 25
+    default: 5
+  out:
+    type: string
+    default: artifacts/recurring-transactions
+  skip_persist:
+    type: boolean
+    default: false
+connectors:
+  serendb:
+    kind: seren_publisher
+    publisher: serendb
+state:
+  checkpoints:
+    kind: sqlite
+    file: artifacts/recurring-transactions/state/checkpoint.json
+policies:
+  dry_run_default: false
+  idempotency_required: true
+workflow:
+  steps:
+    - id: resolve_serendb
+      use: connector.serendb.connect
+    - id: query_transactions
+      use: connector.serendb.query
+      with:
+        tables:
+          - wf_transactions
+    - id: detect_patterns
+      use: transform.detect_recurring_patterns
+      with:
+        min_occurrences: "{min_occurrences}"
+        amount_tolerance_pct: "{amount_tolerance_pct}"
+        from_step: query_transactions
+    - id: classify_recurring
+      use: transform.classify_recurring_type
+      with:
+        from_step: detect_patterns
+    - id: compute_committed_spend
+      use: transform.compute_committed_vs_discretionary
+      with:
+        from_step: classify_recurring
+    - id: detect_changes
+      use: transform.detect_price_changes
+      with:
+        from_step: classify_recurring
+    - id: render_report
+      use: transform.render
+      with:
+        from_step: compute_committed_spend
+    - id: persist_recurring
+      use: connector.serendb.upsert
+      with:
+        tables:
+          - wf_recurring_rules
+          - wf_recurring_matches
+          - wf_recurring_summary
+        from_step: compute_committed_spend
+tests:
+  quick:
+    - validates_min_occurrences_range
+    - validates_tolerance_range
+  smoke:
+    - detects_monthly_subscription_from_fixture
+    - flags_price_increase_from_fixture
+    - computes_committed_spend_correctly
+publish:
+  org: seren-skills
+  slug: recurring-transactions
+metadata:
+  category: finance
+  depends_on: bank-statement-processing

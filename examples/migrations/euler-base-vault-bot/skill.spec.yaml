@@ -1,0 +1,102 @@
+skill: euler-base-vault-bot
+description: Deposit USDC into the AlphaGrowth Base Vault on Euler Finance, collect Supply APY, and periodically compound rewards. Supports dry-run and live execution with local wallet or Ledger signer.
+triggers:
+  - deposit USDC into the AlphaGrowth Euler vault on Base
+  - check AlphaGrowth vault position and APY
+  - compound Euler vault rewards
+  - withdraw from AlphaGrowth Base vault
+runtime:
+  language: python
+  entrypoint: scripts/agent.py
+inputs:
+  action:
+    type: string
+    description: Vault action to perform.
+    enum: [deposit, withdraw, compound, status]
+    default: status
+  deposit_amount_usdc:
+    type: number
+    description: Amount of USDC to deposit.
+    min: 0
+    default: 0
+  withdraw_amount_usdc:
+    type: number
+    description: Amount of USDC to withdraw.
+    min: 0
+    default: 0
+  compound_threshold_usd:
+    type: number
+    description: Minimum accrued yield to trigger compounding.
+    min: 0
+    default: 10
+  live_mode:
+    type: boolean
+    description: Enable live on-chain execution.
+    default: false
+  wallet_mode:
+    type: string
+    description: Signer mode for transactions.
+    enum: [local, ledger]
+    default: local
+secrets:
+  - SEREN_API_KEY
+connectors:
+  rpc_base:
+    kind: seren_publisher
+    publisher: seren-base
+policies:
+  dry_run_default: true
+  idempotency_required: true
+  max_daily_spend_usd: 50
+workflow:
+  steps:
+    - id: probe_rpc
+      use: connector.rpc_base.post
+      with:
+        path: /
+        body: '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+    - id: read_vault_state
+      use: connector.rpc_base.post
+      with:
+        path: /
+        from_step: probe_rpc
+    - id: read_position
+      use: connector.rpc_base.post
+      with:
+        path: /
+        from_step: read_vault_state
+    - id: build_transactions
+      use: transform.create_plan
+      with:
+        action: "{action}"
+        deposit_amount_usdc: "{deposit_amount_usdc}"
+        withdraw_amount_usdc: "{withdraw_amount_usdc}"
+        compound_threshold_usd: "{compound_threshold_usd}"
+        from_step: read_position
+    - id: estimate_gas
+      use: connector.rpc_base.post
+      with:
+        path: /
+        body_from: build_transactions
+    - id: live_guard
+      use: transform.guard_live_execution
+      with:
+        live_mode: "{live_mode}"
+        from_step: estimate_gas
+    - id: execute_transactions
+      use: connector.rpc_base.post
+      with:
+        path: /
+        body_from: live_guard
+        depends_on: [live_guard]
+tests:
+  quick:
+    - validates_action_input
+  smoke:
+    - reads_vault_state_from_fixture
+    - dry_run_never_broadcasts
+publish:
+  org: alphagrowth
+  slug: euler-base-vault-bot
+metadata:
+  category: defi

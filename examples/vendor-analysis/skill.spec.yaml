@@ -1,0 +1,93 @@
+skill: vendor-analysis
+description: Group Wells Fargo transactions by normalized vendor name, rank by total spend and frequency, detect spending trends, and produce top vendor reports with month-over-month deltas.
+triggers:
+  - analyze vendor spending
+  - show top merchants by spend
+  - detect vendor spending trends
+runtime:
+  language: python
+  entrypoint: scripts/run.py
+inputs:
+  months:
+    type: integer
+    min: 3
+    max: 24
+    default: 12
+  start:
+    type: string
+    description: Start date (YYYY-MM-DD). Overrides months if provided.
+  end:
+    type: string
+    description: End date (YYYY-MM-DD). Defaults to today if start is provided.
+  top_n:
+    type: integer
+    description: Number of top vendors to include in report.
+    min: 5
+    max: 50
+    default: 20
+  out:
+    type: string
+    default: artifacts/vendor-analysis
+  skip_persist:
+    type: boolean
+    default: false
+connectors:
+  serendb:
+    kind: seren_publisher
+    publisher: serendb
+state:
+  checkpoints:
+    kind: sqlite
+    file: artifacts/vendor-analysis/state/checkpoint.json
+policies:
+  dry_run_default: false
+  idempotency_required: true
+workflow:
+  steps:
+    - id: resolve_serendb
+      use: connector.serendb.connect
+    - id: query_transactions
+      use: connector.serendb.query
+      with:
+        tables:
+          - wf_transactions
+          - wf_txn_categories
+    - id: normalize_vendors
+      use: transform.normalize_vendor_names
+      with:
+        from_step: query_transactions
+    - id: rank_vendors
+      use: transform.rank_vendors
+      with:
+        top_n: "{top_n}"
+        from_step: normalize_vendors
+    - id: compute_trends
+      use: transform.compute_vendor_trends
+      with:
+        from_step: rank_vendors
+    - id: render_report
+      use: transform.render
+      with:
+        from_step: compute_trends
+    - id: persist_vendor_data
+      use: connector.serendb.upsert
+      with:
+        tables:
+          - wf_vendors
+          - wf_vendor_summary
+          - wf_vendor_trends
+        from_step: compute_trends
+tests:
+  quick:
+    - validates_top_n_range
+    - validates_date_range
+  smoke:
+    - normalizes_vendor_names_from_fixture
+    - ranks_vendors_by_spend_correctly
+    - detects_spending_trend_from_fixture
+publish:
+  org: seren-skills
+  slug: vendor-analysis
+metadata:
+  category: finance
+  depends_on: bank-statement-processing
