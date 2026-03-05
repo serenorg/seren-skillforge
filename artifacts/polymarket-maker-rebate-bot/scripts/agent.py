@@ -137,7 +137,10 @@ def to_params(config: dict[str, Any]) -> StrategyParams:
         adverse_selection_bps=_safe_float(strategy.get("adverse_selection_bps"), 1.0),
         min_spread_bps=_safe_float(strategy.get("min_spread_bps"), 20.0),
         max_spread_bps=_safe_float(strategy.get("max_spread_bps"), 150.0),
-        volatility_spread_multiplier=_safe_float(strategy.get("volatility_spread_multiplier"), 0.35),
+        volatility_spread_multiplier=_safe_float(
+            strategy.get("volatility_spread_multiplier"),
+            0.35,
+        ),
         base_order_notional_usd=_safe_float(strategy.get("base_order_notional_usd"), 25.0),
         max_notional_per_market_usd=_safe_float(strategy.get("max_notional_per_market_usd"), 125.0),
         max_total_notional_usd=_safe_float(strategy.get("max_total_notional_usd"), 500.0),
@@ -516,7 +519,8 @@ def run_backtest(
             "error_code": "backtest_data_load_failed",
             "message": str(exc),
             "hint": (
-                "Provide --backtest-file with pre-saved history JSON if network/API access is blocked."
+                "Provide --backtest-file with pre-saved history JSON if "
+                "network/API access is blocked."
             ),
             "dry_run": True,
         }
@@ -677,7 +681,11 @@ def quote_market(
     }
 
 
-def run_once(config: dict[str, Any], markets: list[dict[str, Any]], yes_live: bool) -> dict[str, Any]:
+def run_once(
+    config: dict[str, Any],
+    markets: list[dict[str, Any]],
+    yes_live: bool,
+) -> dict[str, Any]:
     params = to_params(config)
     execution = config.get("execution", {})
     live_mode = bool(execution.get("live_mode", False))

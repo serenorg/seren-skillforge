@@ -7,9 +7,21 @@ import argparse
 import json
 from pathlib import Path
 
-
 DEFAULT_DRY_RUN = True
-AVAILABLE_CONNECTORS = ['model', 'peer_activity', 'peer_analytics', 'peer_checkout', 'peer_explorer', 'peer_lp', 'peer_market', 'peer_offramp', 'peer_onramp', 'peer_rate_optimizer', 'peer_transfer', 'peer_vault']
+AVAILABLE_CONNECTORS = [
+    "model",
+    "peer_activity",
+    "peer_analytics",
+    "peer_checkout",
+    "peer_explorer",
+    "peer_lp",
+    "peer_market",
+    "peer_offramp",
+    "peer_onramp",
+    "peer_rate_optimizer",
+    "peer_transfer",
+    "peer_vault",
+]
 
 
 def parse_args() -> argparse.Namespace:

@@ -6,7 +6,6 @@ import sys
 import time
 from pathlib import Path
 
-
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "agent.py"
 
