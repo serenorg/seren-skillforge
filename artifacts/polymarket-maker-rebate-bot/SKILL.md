@@ -13,7 +13,7 @@ description: "Provide two-sided liquidity on Polymarket with rebate-aware quotin
 
 ## Workflow Summary
 
-1. `fetch_backtest_universe` loads candidate markets from Polymarket APIs (or local fixtures).
+1. `fetch_backtest_universe` loads candidate markets from the Seren Polymarket Publisher (or local fixtures).
 2. `replay_90d_history` replays historical prices and simulates maker fills.
 3. `score_edge_and_pnl` estimates realized edge and PnL (spread + rebate - pickoff/unwind costs).
 4. `summarize_backtest` returns return %, drawdown, quoted rate, and market-level results.
@@ -32,7 +32,7 @@ description: "Provide two-sided liquidity on Polymarket with rebate-aware quotin
 
 - `scripts/agent.py` - rebate-aware quoting engine with risk guards
 - `config.example.json` - baseline strategy and 90-day backtest parameters
-- `.env.example` - environment variable template for API credentials
+- `.env.example` - optional fallback auth/env template (`SEREN_API_KEY` only if MCP is unavailable)
 
 ## Quick Start
 
@@ -44,6 +44,7 @@ python3 scripts/agent.py --config config.json
 ```
 
 This runs the default 90-day backtest and returns a decision hint to keep paper-only or proceed to quote mode.
+If you are logged into Seren Desktop, the runtime uses local `seren-mcp` auth automatically.
 
 ## Run Quote Mode (After Backtest Review)
 
@@ -53,7 +54,7 @@ python3 scripts/agent.py --config config.json --run-type quote
 
 ## Optional Backtest Input
 
-By default the runtime fetches backtest data from Polymarket market/history APIs. You can also pass local history:
+By default the runtime fetches backtest data from Seren Polymarket Publisher market/history endpoints. You can also pass local history:
 
 ```bash
 python3 scripts/agent.py \

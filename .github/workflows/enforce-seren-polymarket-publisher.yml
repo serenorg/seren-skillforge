@@ -1,0 +1,53 @@
+name: Enforce Seren Polymarket Publisher
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  enforce-publisher:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Block Direct Polymarket API Usage
+        run: |
+          set -euo pipefail
+          if git grep -nE 'https://gamma-api\.polymarket\.com|https://clob\.polymarket\.com' -- \
+            'artifacts/**/*.py' \
+            'artifacts/**/*.json' \
+            'artifacts/**/*.md' \
+            'artifacts/**/*.yaml' \
+            'artifacts/**/*.yml'
+          then
+            echo "Direct Polymarket API URLs are forbidden. Use Seren Polymarket Publisher only."
+            exit 1
+          fi
+
+      - name: Enforce Publisher Defaults In Config
+        run: |
+          set -euo pipefail
+          config_path='artifacts/polymarket-maker-rebate-bot/config.example.json'
+          test -f "${config_path}"
+
+          gamma_url="$(jq -r '.backtest.gamma_markets_url // empty' "${config_path}")"
+          clob_url="$(jq -r '.backtest.clob_history_url // empty' "${config_path}")"
+
+          [[ "${gamma_url}" == https://api.serendb.com/publishers/polymarket-data/* ]]
+          [[ "${clob_url}" == https://api.serendb.com/publishers/polymarket-data/* ]]
+
+      - name: Enforce Runtime Guard And MCP Support
+        run: |
+          set -euo pipefail
+          runtime_path='artifacts/polymarket-maker-rebate-bot/scripts/agent.py'
+          test -f "${runtime_path}"
+
+          grep -q 'SEREN_POLYMARKET_PUBLISHER_PREFIX = "/publishers/polymarket-data"' "${runtime_path}"
+          grep -q 'def _seren_publisher_path(' "${runtime_path}"
+          grep -q 'def _http_get_json_via_mcp(' "${runtime_path}"
+          grep -q '"name": "call_publisher"' "${runtime_path}"
+          grep -q 'SEREN_MCP_COMMAND' "${runtime_path}"
+          grep -q 'missing_seren_api_key' "${runtime_path}"
