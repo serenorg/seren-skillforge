@@ -19,8 +19,18 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 SEREN_POLYMARKET_PUBLISHER_HOST = "api.serendb.com"
-SEREN_POLYMARKET_PUBLISHER_PREFIX = "/publishers/polymarket-data"
-SEREN_POLYMARKET_PUBLISHER_URL_PREFIX = f"https://{SEREN_POLYMARKET_PUBLISHER_HOST}{SEREN_POLYMARKET_PUBLISHER_PREFIX}"
+SEREN_PUBLISHERS_PREFIX = "/publishers/"
+SEREN_POLYMARKET_DATA_PUBLISHER = "polymarket-data"
+SEREN_POLYMARKET_TRADING_PUBLISHER = "polymarket-trading-serenai"
+SEREN_POLYMARKET_DATA_URL_PREFIX = (
+    f"https://{SEREN_POLYMARKET_PUBLISHER_HOST}{SEREN_PUBLISHERS_PREFIX}{SEREN_POLYMARKET_DATA_PUBLISHER}"
+)
+SEREN_POLYMARKET_TRADING_URL_PREFIX = (
+    f"https://{SEREN_POLYMARKET_PUBLISHER_HOST}{SEREN_PUBLISHERS_PREFIX}{SEREN_POLYMARKET_TRADING_PUBLISHER}"
+)
+SEREN_ALLOWED_POLYMARKET_PUBLISHERS = frozenset(
+    {SEREN_POLYMARKET_DATA_PUBLISHER, SEREN_POLYMARKET_TRADING_PUBLISHER}
+)
 
 
 @dataclass(frozen=True)
@@ -51,8 +61,8 @@ class BacktestParams:
     min_liquidity_usd: float = 100000.0
     markets_fetch_limit: int = 300
     min_history_points: int = 480
-    gamma_markets_url: str = f"{SEREN_POLYMARKET_PUBLISHER_URL_PREFIX}/markets"
-    clob_history_url: str = f"{SEREN_POLYMARKET_PUBLISHER_URL_PREFIX}/prices-history"
+    gamma_markets_url: str = f"{SEREN_POLYMARKET_DATA_URL_PREFIX}/markets"
+    clob_history_url: str = f"{SEREN_POLYMARKET_TRADING_URL_PREFIX}/prices-history"
 
 
 def parse_args() -> argparse.Namespace:
@@ -173,11 +183,11 @@ def to_backtest_params(config: dict[str, Any]) -> BacktestParams:
         min_history_points=max(10, _safe_int(backtest.get("min_history_points"), 480)),
         gamma_markets_url=_safe_str(
             backtest.get("gamma_markets_url"),
-            f"{SEREN_POLYMARKET_PUBLISHER_URL_PREFIX}/markets",
+            f"{SEREN_POLYMARKET_DATA_URL_PREFIX}/markets",
         ),
         clob_history_url=_safe_str(
             backtest.get("clob_history_url"),
-            f"{SEREN_POLYMARKET_PUBLISHER_URL_PREFIX}/prices-history",
+            f"{SEREN_POLYMARKET_TRADING_URL_PREFIX}/prices-history",
         ),
     )
 
@@ -238,26 +248,29 @@ def _is_truthy(value: str | None) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _seren_publisher_path(url: str) -> str:
+def _seren_publisher_target(url: str) -> tuple[str, str]:
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.netloc != SEREN_POLYMARKET_PUBLISHER_HOST:
         raise ValueError(
             "Backtest URL must use Seren Polymarket Publisher host "
             f"'https://{SEREN_POLYMARKET_PUBLISHER_HOST}'."
         )
-    if not parsed.path.startswith(SEREN_POLYMARKET_PUBLISHER_PREFIX):
+    if not parsed.path.startswith(SEREN_PUBLISHERS_PREFIX):
         raise ValueError(
-            "Backtest URL must use Seren Polymarket Publisher path prefix "
-            f"'{SEREN_POLYMARKET_PUBLISHER_URL_PREFIX}/...'."
+            "Backtest URL must use a supported Seren Polymarket Publisher URL prefix "
+            f"('{SEREN_POLYMARKET_DATA_URL_PREFIX}/...' or '{SEREN_POLYMARKET_TRADING_URL_PREFIX}/...')."
         )
-    publisher_path = parsed.path[len(SEREN_POLYMARKET_PUBLISHER_PREFIX) :]
-    if not publisher_path:
-        publisher_path = "/"
-    if not publisher_path.startswith("/"):
-        publisher_path = f"/{publisher_path}"
+    path_without_prefix = parsed.path[len(SEREN_PUBLISHERS_PREFIX) :]
+    publisher_slug, _, remainder = path_without_prefix.partition("/")
+    if publisher_slug not in SEREN_ALLOWED_POLYMARKET_PUBLISHERS:
+        raise ValueError(
+            "Backtest URL must use a supported Polymarket publisher "
+            f"({', '.join(sorted(SEREN_ALLOWED_POLYMARKET_PUBLISHERS))})."
+        )
+    publisher_path = f"/{remainder}" if remainder else "/"
     if parsed.query:
         publisher_path = f"{publisher_path}?{parsed.query}"
-    return publisher_path
+    return publisher_slug, publisher_path
 
 
 def _read_mcp_exact(fd: int, size: int, timeout_seconds: float) -> bytes:
@@ -369,7 +382,7 @@ def _extract_call_publisher_body(result: dict[str, Any]) -> dict[str, Any] | lis
 
 
 def _http_get_json_via_mcp(url: str, timeout: int = 30) -> dict[str, Any] | list[Any]:
-    publisher_path = _seren_publisher_path(url)
+    publisher_slug, publisher_path = _seren_publisher_target(url)
     command_raw = _safe_str(os.getenv("SEREN_MCP_COMMAND"), "seren-mcp").strip() or "seren-mcp"
     command = shlex.split(command_raw)
     if not command:
@@ -409,7 +422,7 @@ def _http_get_json_via_mcp(url: str, timeout: int = 30) -> dict[str, Any] | list
             params={
                 "name": "call_publisher",
                 "arguments": {
-                    "publisher": "polymarket-data",
+                    "publisher": publisher_slug,
                     "method": "GET",
                     "path": publisher_path,
                     "response_format": "json",
@@ -442,7 +455,7 @@ def _http_get_json_via_api_key(url: str, api_key: str, timeout: int = 30) -> dic
 
 
 def _http_get_json(url: str, timeout: int = 30) -> dict[str, Any] | list[Any]:
-    _seren_publisher_path(url)
+    _seren_publisher_target(url)
 
     api_key = _safe_str(os.getenv("SEREN_API_KEY"), "").strip()
     prefer_mcp = _is_truthy(os.getenv("SEREN_USE_MCP")) or not api_key

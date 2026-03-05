@@ -1,0 +1,1121 @@
+#!/usr/bin/env python3
+"""Liquidity-filtered paired-market basis maker for Polymarket binary markets."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import select
+import shlex
+import subprocess
+import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from statistics import pstdev
+from typing import Any
+from urllib.parse import urlencode, urlparse
+from urllib.request import Request, urlopen
+
+SEREN_POLYMARKET_PUBLISHER_HOST = "api.serendb.com"
+SEREN_PUBLISHERS_PREFIX = "/publishers/"
+SEREN_POLYMARKET_DATA_PUBLISHER = "polymarket-data"
+SEREN_POLYMARKET_TRADING_PUBLISHER = "polymarket-trading-serenai"
+SEREN_POLYMARKET_DATA_URL_PREFIX = (
+    f"https://{SEREN_POLYMARKET_PUBLISHER_HOST}{SEREN_PUBLISHERS_PREFIX}{SEREN_POLYMARKET_DATA_PUBLISHER}"
+)
+SEREN_POLYMARKET_TRADING_URL_PREFIX = (
+    f"https://{SEREN_POLYMARKET_PUBLISHER_HOST}{SEREN_PUBLISHERS_PREFIX}{SEREN_POLYMARKET_TRADING_PUBLISHER}"
+)
+SEREN_ALLOWED_POLYMARKET_PUBLISHERS = frozenset(
+    {SEREN_POLYMARKET_DATA_PUBLISHER, SEREN_POLYMARKET_TRADING_PUBLISHER}
+)
+
+
+DISCLAIMER = (
+    "This strategy can lose money. Pair relationships can break, basis can widen, "
+    "and liquidity can vanish. Backtests are hypothetical and do not guarantee future "
+    "performance. Use dry-run first and only trade with risk capital."
+)
+
+
+@dataclass(frozen=True)
+class StrategyParams:
+    bankroll_usd: float = 500.0
+    pairs_max: int = 6
+    min_seconds_to_resolution: int = 2 * 60 * 60
+    min_edge_bps: float = 2.0
+    maker_rebate_bps: float = 2.3
+    expected_unwind_cost_bps: float = 1.5
+    adverse_selection_bps: float = 1.1
+    basis_entry_bps: float = 35.0
+    basis_exit_bps: float = 10.0
+    expected_convergence_ratio: float = 0.35
+    base_pair_notional_usd: float = 65.0
+    max_notional_per_pair_usd: float = 240.0
+    max_total_notional_usd: float = 500.0
+    max_leg_notional_usd: float = 250.0
+
+
+@dataclass(frozen=True)
+class BacktestParams:
+    days: int = 90
+    days_min: int = 90
+    days_max: int = 365
+    participation_rate: float = 0.64
+    min_history_points: int = 72
+    min_events: int = 120
+    min_liquidity_usd: float = 5000.0
+    markets_fetch_page_size: int = 120
+    max_markets: int = 80
+    history_interval: str = "max"
+    history_fidelity_minutes: int = 60
+    gamma_markets_url: str = f"{SEREN_POLYMARKET_DATA_URL_PREFIX}/markets"
+    clob_history_url: str = f"{SEREN_POLYMARKET_TRADING_URL_PREFIX}/prices-history"
+    history_fetch_workers: int = 4
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run liquidity-filtered paired-market basis maker strategy.")
+    parser.add_argument("--config", default="config.json", help="Config file path.")
+    parser.add_argument(
+        "--run-type",
+        default="backtest",
+        choices=("backtest", "trade"),
+        help="Run backtest only, or run trade mode after backtest gating.",
+    )
+    parser.add_argument("--markets-file", default=None, help="Optional trade market JSON file.")
+    parser.add_argument("--backtest-days", type=int, default=None, help="Override backtest days.")
+    parser.add_argument(
+        "--allow-negative-backtest",
+        action="store_true",
+        help="Allow trade mode even if backtest return is <= 0.",
+    )
+    parser.add_argument("--yes-live", action="store_true", help="Explicit live execution confirmation.")
+    return parser.parse_args()
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value)
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
+def clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def load_json(path: Path) -> dict[str, Any] | list[Any]:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_config(config_path: str) -> dict[str, Any]:
+    payload = load_json(Path(config_path))
+    return payload if isinstance(payload, dict) else {}
+
+
+def to_strategy_params(config: dict[str, Any]) -> StrategyParams:
+    raw = config.get("strategy", {})
+    return StrategyParams(
+        bankroll_usd=max(1.0, _safe_float(raw.get("bankroll_usd"), 500.0)),
+        pairs_max=max(1, _safe_int(raw.get("pairs_max"), 6)),
+        min_seconds_to_resolution=max(60, _safe_int(raw.get("min_seconds_to_resolution"), 7200)),
+        min_edge_bps=_safe_float(raw.get("min_edge_bps"), 2.0),
+        maker_rebate_bps=_safe_float(raw.get("maker_rebate_bps"), 2.3),
+        expected_unwind_cost_bps=_safe_float(raw.get("expected_unwind_cost_bps"), 1.5),
+        adverse_selection_bps=_safe_float(raw.get("adverse_selection_bps"), 1.1),
+        basis_entry_bps=max(1.0, _safe_float(raw.get("basis_entry_bps"), 35.0)),
+        basis_exit_bps=max(0.0, _safe_float(raw.get("basis_exit_bps"), 10.0)),
+        expected_convergence_ratio=clamp(
+            _safe_float(raw.get("expected_convergence_ratio"), 0.35),
+            0.0,
+            1.0,
+        ),
+        base_pair_notional_usd=max(1.0, _safe_float(raw.get("base_pair_notional_usd"), 65.0)),
+        max_notional_per_pair_usd=max(1.0, _safe_float(raw.get("max_notional_per_pair_usd"), 240.0)),
+        max_total_notional_usd=max(1.0, _safe_float(raw.get("max_total_notional_usd"), 500.0)),
+        max_leg_notional_usd=max(1.0, _safe_float(raw.get("max_leg_notional_usd"), 250.0)),
+    )
+
+
+def to_backtest_params(config: dict[str, Any]) -> BacktestParams:
+    raw = config.get("backtest", {})
+    range_raw = raw.get("days_range", {}) if isinstance(raw.get("days_range"), dict) else {}
+    days_min = max(7, _safe_int(range_raw.get("min"), 90))
+    days_max = max(days_min, _safe_int(range_raw.get("max"), 365))
+    days = int(clamp(_safe_int(raw.get("days"), 90), days_min, days_max))
+    return BacktestParams(
+        days=days,
+        days_min=days_min,
+        days_max=days_max,
+        participation_rate=clamp(_safe_float(raw.get("participation_rate"), 0.64), 0.0, 1.0),
+        min_history_points=max(8, _safe_int(raw.get("min_history_points"), 72)),
+        min_events=max(1, _safe_int(raw.get("min_events"), 120)),
+        min_liquidity_usd=max(0.0, _safe_float(raw.get("min_liquidity_usd"), 5000.0)),
+        markets_fetch_page_size=max(25, _safe_int(raw.get("markets_fetch_page_size"), 120)),
+        max_markets=max(0, _safe_int(raw.get("max_markets"), 80)),
+        history_interval=_safe_str(raw.get("history_interval"), "max"),
+        history_fidelity_minutes=max(1, _safe_int(raw.get("history_fidelity_minutes"), 60)),
+        gamma_markets_url=_safe_str(raw.get("gamma_markets_url"), f"{SEREN_POLYMARKET_DATA_URL_PREFIX}/markets"),
+        clob_history_url=_safe_str(raw.get("clob_history_url"), f"{SEREN_POLYMARKET_TRADING_URL_PREFIX}/prices-history"),
+        history_fetch_workers=max(1, _safe_int(raw.get("history_fetch_workers"), 4)),
+    )
+
+
+def _normalize_history(raw_history: Any, start_ts: int, end_ts: int) -> list[tuple[int, float]]:
+    points: list[tuple[int, float]] = []
+    fallback_points: list[tuple[int, float]] = []
+    seen: set[int] = set()
+    fallback_seen: set[int] = set()
+
+    if not isinstance(raw_history, list):
+        return points
+
+    for item in raw_history:
+        t = -1
+        p = -1.0
+        if isinstance(item, dict):
+            t = _safe_int(item.get("t"), -1)
+            p = _safe_float(item.get("p"), -1.0)
+        elif isinstance(item, list | tuple) and len(item) >= 2:
+            t = _safe_int(item[0], -1)
+            p = _safe_float(item[1], -1.0)
+        if t in fallback_seen or not (0.0 <= p <= 1.0):
+            continue
+        fallback_seen.add(t)
+        fallback_points.append((t, p))
+        if t < start_ts or t > end_ts or t in seen:
+            continue
+        seen.add(t)
+        points.append((t, p))
+
+    points.sort(key=lambda pair: pair[0])
+    if points:
+        return points
+    fallback_points.sort(key=lambda pair: pair[0])
+    return fallback_points
+
+
+def _json_to_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            return []
+    return []
+
+
+def _parse_iso_ts(value: Any) -> int | None:
+    raw = _safe_str(value, "")
+    if not raw:
+        return None
+    try:
+        return int(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
+def _is_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _seren_publisher_target(url: str) -> tuple[str, str]:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.netloc != SEREN_POLYMARKET_PUBLISHER_HOST:
+        raise ValueError(
+            "Backtest URL must use Seren Polymarket Publisher host "
+            f"'https://{SEREN_POLYMARKET_PUBLISHER_HOST}'."
+        )
+    if not parsed.path.startswith(SEREN_PUBLISHERS_PREFIX):
+        raise ValueError(
+            "Backtest URL must use a supported Seren Polymarket Publisher URL prefix "
+            f"('{SEREN_POLYMARKET_DATA_URL_PREFIX}/...' or '{SEREN_POLYMARKET_TRADING_URL_PREFIX}/...')."
+        )
+    path_without_prefix = parsed.path[len(SEREN_PUBLISHERS_PREFIX) :]
+    publisher_slug, _, remainder = path_without_prefix.partition("/")
+    if publisher_slug not in SEREN_ALLOWED_POLYMARKET_PUBLISHERS:
+        raise ValueError(
+            "Backtest URL must use a supported Polymarket publisher "
+            f"({', '.join(sorted(SEREN_ALLOWED_POLYMARKET_PUBLISHERS))})."
+        )
+    publisher_path = f"/{remainder}" if remainder else "/"
+    if parsed.query:
+        publisher_path = f"{publisher_path}?{parsed.query}"
+    return publisher_slug, publisher_path
+
+
+def _read_mcp_exact(fd: int, size: int, timeout_seconds: float) -> bytes:
+    buf = bytearray()
+    while len(buf) < size:
+        ready, _, _ = select.select([fd], [], [], timeout_seconds)
+        if not ready:
+            raise TimeoutError("Timed out waiting for response from seren-mcp.")
+        chunk = os.read(fd, size - len(buf))
+        if not chunk:
+            raise RuntimeError("seren-mcp closed stdout before completing a response.")
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _read_mcp_message(proc: subprocess.Popen[bytes], timeout_seconds: float) -> dict[str, Any]:
+    if proc.stdout is None:
+        raise RuntimeError("seren-mcp stdout is not available.")
+    fd = proc.stdout.fileno()
+    header_buf = bytearray()
+    while b"\r\n\r\n" not in header_buf:
+        header_buf.extend(_read_mcp_exact(fd, 1, timeout_seconds))
+        if len(header_buf) > 16384:
+            raise RuntimeError("Invalid MCP header: too large.")
+    header_raw, _ = header_buf.split(b"\r\n\r\n", 1)
+    headers: dict[str, str] = {}
+    for line in header_raw.decode("ascii", errors="ignore").split("\r\n"):
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        headers[k.strip().lower()] = v.strip()
+    content_length = _safe_int(headers.get("content-length"), -1)
+    if content_length < 0:
+        raise RuntimeError("Invalid MCP header: missing content-length.")
+    body = _read_mcp_exact(fd, content_length, timeout_seconds)
+    parsed = json.loads(body.decode("utf-8"))
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Invalid MCP response payload.")
+    return parsed
+
+
+def _write_mcp_message(proc: subprocess.Popen[bytes], payload: dict[str, Any]) -> None:
+    if proc.stdin is None:
+        raise RuntimeError("seren-mcp stdin is not available.")
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+    proc.stdin.write(header)
+    proc.stdin.write(body)
+    proc.stdin.flush()
+
+
+def _mcp_request(
+    proc: subprocess.Popen[bytes],
+    request_id: int,
+    method: str,
+    params: dict[str, Any] | None,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    request: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
+    if params is not None:
+        request["params"] = params
+    _write_mcp_message(proc, request)
+    while True:
+        message = _read_mcp_message(proc, timeout_seconds)
+        if message.get("id") != request_id:
+            continue
+        error = message.get("error")
+        if isinstance(error, dict):
+            raise RuntimeError(_safe_str(error.get("message"), "MCP request failed."))
+        result = message.get("result")
+        if isinstance(result, dict):
+            return result
+        return {"value": result}
+
+
+def _extract_call_publisher_body(result: dict[str, Any]) -> dict[str, Any] | list[Any]:
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        body = structured.get("body")
+        if isinstance(body, dict | list):
+            return body
+        if isinstance(structured, dict | list):
+            return structured
+
+    content = result.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if _safe_str(item.get("type"), "") != "text":
+                continue
+            text = _safe_str(item.get("text"), "")
+            if not text:
+                continue
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                body = parsed.get("body")
+                if isinstance(body, dict | list):
+                    return body
+                return parsed
+            if isinstance(parsed, list):
+                return parsed
+    if isinstance(result.get("body"), dict | list):
+        return result["body"]
+    raise RuntimeError("Unable to parse call_publisher MCP response payload.")
+
+
+def _http_get_json_via_mcp(url: str, timeout: int = 30) -> dict[str, Any] | list[Any]:
+    publisher_slug, publisher_path = _seren_publisher_target(url)
+    command_raw = _safe_str(os.getenv("SEREN_MCP_COMMAND"), "seren-mcp").strip() or "seren-mcp"
+    command = shlex.split(command_raw)
+    if not command:
+        raise RuntimeError("SEREN_MCP_COMMAND is empty.")
+
+    timeout_seconds = max(1.0, float(timeout))
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _mcp_request(
+            proc=proc,
+            request_id=1,
+            method="initialize",
+            params={
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "liquidity-paired-basis-maker", "version": "1.1"},
+            },
+            timeout_seconds=timeout_seconds,
+        )
+        _write_mcp_message(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {},
+            },
+        )
+        result = _mcp_request(
+            proc=proc,
+            request_id=2,
+            method="tools/call",
+            params={
+                "name": "call_publisher",
+                "arguments": {
+                    "publisher": publisher_slug,
+                    "method": "GET",
+                    "path": publisher_path,
+                    "response_format": "json",
+                },
+            },
+            timeout_seconds=timeout_seconds,
+        )
+        return _extract_call_publisher_body(result)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=1)
+
+
+def _http_get_json_via_api_key(url: str, api_key: str, timeout: int = 30) -> dict[str, Any] | list[Any]:
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "liquidity-paired-basis-maker/1.1",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+    )
+    with urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _http_get_json(url: str, timeout: int = 30) -> dict[str, Any] | list[Any]:
+    _seren_publisher_target(url)
+
+    api_key = _safe_str(os.getenv("SEREN_API_KEY"), "").strip()
+    prefer_mcp = _is_truthy(os.getenv("SEREN_USE_MCP")) or not api_key
+    mcp_error: Exception | None = None
+
+    if prefer_mcp:
+        try:
+            return _http_get_json_via_mcp(url, timeout=timeout)
+        except Exception as exc:
+            mcp_error = exc
+            if not api_key:
+                raise RuntimeError(
+                    "Failed to fetch Polymarket data from Seren MCP. "
+                    "Ensure Seren Desktop is logged in (or set SEREN_MCP_COMMAND), "
+                    "or provide SEREN_API_KEY for direct gateway auth "
+                    "(missing_seren_api_key)."
+                ) from exc
+
+    try:
+        return _http_get_json_via_api_key(url, api_key=api_key, timeout=timeout)
+    except Exception as exc:
+        if mcp_error is not None:
+            raise RuntimeError(
+                f"Failed via MCP ({mcp_error}) and API key fallback ({exc})."
+            ) from exc
+        raise
+
+
+def _align_histories(primary: list[tuple[int, float]], secondary: list[tuple[int, float]]) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
+    index_secondary = {t: p for t, p in secondary}
+    aligned_primary: list[tuple[int, float]] = []
+    aligned_secondary: list[tuple[int, float]] = []
+    for t, p1 in primary:
+        p2 = index_secondary.get(t)
+        if p2 is None:
+            continue
+        aligned_primary.append((t, p1))
+        aligned_secondary.append((t, p2))
+    return aligned_primary, aligned_secondary
+
+
+def _fetch_live_backtest_pairs(p: StrategyParams, bt: BacktestParams, start_ts: int, end_ts: int) -> list[dict[str, Any]]:
+    offset = 0
+    candidates: list[dict[str, Any]] = []
+    seen_token_ids: set[str] = set()
+
+    pages = 0
+    while True:
+        pages += 1
+        if pages > 200:
+            break
+        query = urlencode(
+            {
+                "active": "true",
+                "closed": "false",
+                "limit": bt.markets_fetch_page_size,
+                "offset": offset,
+                "order": "volume24hr",
+                "ascending": "false",
+            }
+        )
+        raw = _http_get_json(f"{bt.gamma_markets_url}?{query}")
+        if not isinstance(raw, list) or not raw:
+            break
+
+        added_on_page = 0
+        for market in raw:
+            if not isinstance(market, dict):
+                continue
+            liquidity = _safe_float(market.get("liquidity"), 0.0)
+            if liquidity < bt.min_liquidity_usd:
+                continue
+
+            end_market = _parse_iso_ts(market.get("endDate")) or _safe_int(market.get("end_ts"), end_ts + 86400)
+            if end_market <= start_ts + p.min_seconds_to_resolution:
+                continue
+
+            token_ids = _json_to_list(market.get("clobTokenIds"))
+            if not token_ids:
+                continue
+            token_id = _safe_str(token_ids[0], "")
+            if not token_id or token_id in seen_token_ids:
+                continue
+            seen_token_ids.add(token_id)
+
+            events = _json_to_list(market.get("events"))
+            event_id = ""
+            if events and isinstance(events[0], dict):
+                event_id = _safe_str(events[0].get("id"), "")
+            if not event_id:
+                event_id = _safe_str(market.get("seriesSlug"), "")
+            if not event_id:
+                event_id = _safe_str(market.get("category"), "misc")
+
+            market_id = _safe_str(market.get("id"), token_id)
+            candidates.append(
+                {
+                    "market_id": market_id,
+                    "question": _safe_str(market.get("question"), market_id),
+                    "token_id": token_id,
+                    "event_id": event_id,
+                    "end_ts": end_market,
+                    "rebate_bps": _safe_float(market.get("rebate_bps"), p.maker_rebate_bps),
+                    "volume24hr": _safe_float(market.get("volume24hr"), 0.0),
+                }
+            )
+            added_on_page += 1
+
+        if added_on_page == 0:
+            break
+        offset += len(raw)
+        if len(raw) < bt.markets_fetch_page_size:
+            break
+
+    candidates_with_cap = candidates[: bt.max_markets] if bt.max_markets > 0 else candidates
+
+    def _fetch_candidate_history(candidate: dict[str, Any]) -> dict[str, Any] | None:
+        history_query = urlencode(
+            {
+                "market": candidate["token_id"],
+                "interval": bt.history_interval,
+                "fidelity": bt.history_fidelity_minutes,
+            }
+        )
+        try:
+            payload = _http_get_json(f"{bt.clob_history_url}?{history_query}")
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        history = _normalize_history(
+            _json_to_list(payload.get("history")),
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
+        if len(history) < bt.min_history_points:
+            return None
+        return {**candidate, "history": history}
+
+    with_history: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=max(1, bt.history_fetch_workers)) as executor:
+        futures = [executor.submit(_fetch_candidate_history, candidate) for candidate in candidates_with_cap]
+        for future in as_completed(futures):
+            row = future.result()
+            if row:
+                with_history.append(row)
+
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in with_history:
+        grouped[_safe_str(row.get("event_id"), "misc")].append(row)
+
+    pairs: list[dict[str, Any]] = []
+    for event_id, group in grouped.items():
+        if len(group) < 2:
+            continue
+        group_sorted = sorted(group, key=lambda row: _safe_float(row.get("volume24hr"), 0.0), reverse=True)
+        for i in range(len(group_sorted) - 1):
+            primary = group_sorted[i]
+            secondary = group_sorted[i + 1]
+            h1, h2 = _align_histories(primary["history"], secondary["history"])
+            if len(h1) < bt.min_history_points:
+                continue
+            pair_id = _safe_str(secondary.get("market_id"), "unknown")
+            market_id = _safe_str(primary.get("market_id"), "unknown")
+            pairs.append(
+                {
+                    "market_id": market_id,
+                    "pair_market_id": pair_id,
+                    "question": _safe_str(primary.get("question"), market_id),
+                    "pair_question": _safe_str(secondary.get("question"), pair_id),
+                    "event_id": event_id,
+                    "end_ts": min(_safe_int(primary.get("end_ts"), end_ts + 86400), _safe_int(secondary.get("end_ts"), end_ts + 86400)),
+                    "rebate_bps": (_safe_float(primary.get("rebate_bps"), p.maker_rebate_bps) + _safe_float(secondary.get("rebate_bps"), p.maker_rebate_bps)) / 2.0,
+                    "history": h1,
+                    "pair_history": h2,
+                    "source": "live-seren-publisher",
+                }
+            )
+
+    if pairs:
+        return pairs
+
+    # Fallback when event-level metadata is sparse: pair adjacent markets by liquidity.
+    fallback_sorted = sorted(with_history, key=lambda row: _safe_float(row.get("volume24hr"), 0.0), reverse=True)
+    for i in range(0, len(fallback_sorted) - 1, 2):
+        primary = fallback_sorted[i]
+        secondary = fallback_sorted[i + 1]
+        h1, h2 = _align_histories(primary["history"], secondary["history"])
+        if len(h1) < bt.min_history_points:
+            continue
+        pair_id = _safe_str(secondary.get("market_id"), "unknown")
+        market_id = _safe_str(primary.get("market_id"), "unknown")
+        pairs.append(
+            {
+                "market_id": market_id,
+                "pair_market_id": pair_id,
+                "question": _safe_str(primary.get("question"), market_id),
+                "pair_question": _safe_str(secondary.get("question"), pair_id),
+                "event_id": "fallback",
+                "end_ts": min(_safe_int(primary.get("end_ts"), end_ts + 86400), _safe_int(secondary.get("end_ts"), end_ts + 86400)),
+                "rebate_bps": (_safe_float(primary.get("rebate_bps"), p.maker_rebate_bps) + _safe_float(secondary.get("rebate_bps"), p.maker_rebate_bps)) / 2.0,
+                "history": h1,
+                "pair_history": h2,
+                "source": "live-seren-publisher-fallback",
+            }
+        )
+
+    return pairs
+
+
+def _load_backtest_markets(
+    p: StrategyParams,
+    bt: BacktestParams,
+    start_ts: int,
+    end_ts: int,
+) -> tuple[list[dict[str, Any]], str]:
+    return _fetch_live_backtest_pairs(p=p, bt=bt, start_ts=start_ts, end_ts=end_ts), "live-seren-publisher"
+
+
+def _max_drawdown_stats(equity_curve: list[float]) -> tuple[float, float]:
+    peak = float("-inf")
+    max_dd_usd = 0.0
+    max_dd_pct = 0.0
+    for value in equity_curve:
+        if value > peak:
+            peak = value
+        drawdown = peak - value
+        drawdown_pct = (drawdown / peak) * 100.0 if peak > 0 else 0.0
+        max_dd_usd = max(max_dd_usd, drawdown)
+        max_dd_pct = max(max_dd_pct, drawdown_pct)
+    return max_dd_usd, max_dd_pct
+
+
+def _annualized_return_pct(starting: float, ending: float, days: int) -> float:
+    if starting <= 0 or ending <= 0 or days <= 0:
+        return 0.0
+    return ((ending / starting) ** (365.0 / float(days)) - 1.0) * 100.0
+
+
+def _sharpe_like_score(event_pnls: list[float], bankroll_usd: float, days: int) -> float:
+    if bankroll_usd <= 0 or days <= 0 or len(event_pnls) < 2:
+        return 0.0
+    per_event_returns = [pnl / bankroll_usd for pnl in event_pnls]
+    mean = sum(per_event_returns) / len(per_event_returns)
+    stdev = pstdev(per_event_returns)
+    if stdev <= 1e-12:
+        return 0.0
+    events_per_year = max(1.0, len(per_event_returns) * (365.0 / float(days)))
+    return (mean / stdev) * math.sqrt(events_per_year)
+
+
+def _simulate_pair(market: dict[str, Any], p: StrategyParams, bt: BacktestParams) -> dict[str, Any]:
+    primary = market["history"]
+    pair = market["pair_history"]
+    n = min(len(primary), len(pair))
+    if n < bt.min_history_points:
+        return {
+            "market_id": market["market_id"],
+            "pair_market_id": market["pair_market_id"],
+            "considered_points": 0,
+            "traded_points": 0,
+            "filled_notional_usd": 0.0,
+            "pnl_usd": 0.0,
+            "event_pnls": [],
+        }
+
+    rebate_bps = _safe_float(market.get("rebate_bps"), p.maker_rebate_bps)
+    if rebate_bps <= 0:
+        rebate_bps = p.maker_rebate_bps
+
+    basis_series_bps = [(primary[i][1] - pair[i][1]) * 10000.0 for i in range(n)]
+    considered = 0
+    traded = 0
+    filled_notional = 0.0
+    pnl = 0.0
+    event_pnls: list[float] = []
+
+    for i in range(0, n - 1):
+        t = primary[i][0]
+        ttl = max(0, _safe_int(market.get("end_ts"), t + 86400) - t)
+        if ttl < p.min_seconds_to_resolution:
+            continue
+
+        basis_now = basis_series_bps[i]
+        basis_next = basis_series_bps[i + 1]
+        abs_basis_now = abs(basis_now)
+        if abs_basis_now < p.basis_entry_bps:
+            continue
+
+        considered += 1
+        basis_change = abs_basis_now - abs(basis_next)
+        expected_convergence = abs_basis_now * p.expected_convergence_ratio
+        expected_edge = expected_convergence + rebate_bps - p.expected_unwind_cost_bps - p.adverse_selection_bps
+        if expected_edge < p.min_edge_bps:
+            continue
+
+        traded += 1
+        fill_intensity = min(1.0, abs_basis_now / max(p.basis_entry_bps * 2.0, 1e-9))
+        event_notional = p.base_pair_notional_usd * bt.participation_rate * fill_intensity
+        realized_edge = basis_change + rebate_bps - p.expected_unwind_cost_bps - p.adverse_selection_bps
+        event_pnl = event_notional * realized_edge / 10000.0
+
+        filled_notional += event_notional
+        pnl += event_pnl
+        event_pnls.append(event_pnl)
+
+    return {
+        "market_id": market["market_id"],
+        "pair_market_id": market["pair_market_id"],
+        "considered_points": considered,
+        "traded_points": traded,
+        "filled_notional_usd": round(filled_notional, 4),
+        "pnl_usd": round(pnl, 6),
+        "event_pnls": event_pnls,
+    }
+
+
+def run_backtest(config: dict[str, Any], backtest_days: int | None) -> dict[str, Any]:
+    p = to_strategy_params(config)
+    bt = to_backtest_params(config)
+    days = int(clamp(backtest_days if backtest_days is not None else bt.days, bt.days_min, bt.days_max))
+
+    end_ts = int(time.time())
+    start_ts = end_ts - (days * 24 * 60 * 60)
+
+    try:
+        markets, source = _load_backtest_markets(
+            p=p,
+            bt=bt,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error_code": "backtest_data_load_failed",
+            "message": str(exc),
+            "disclaimer": DISCLAIMER,
+            "dry_run": True,
+        }
+
+    if not markets:
+        return {
+            "status": "error",
+            "error_code": "no_backtest_markets",
+            "message": "No paired historical markets were available for backtest.",
+            "disclaimer": DISCLAIMER,
+            "dry_run": True,
+        }
+
+    summaries: list[dict[str, Any]] = []
+    event_pnls: list[float] = []
+    considered = 0
+    traded = 0
+    total_notional = 0.0
+
+    for market in markets:
+        result = _simulate_pair(market, p, bt)
+        summaries.append(
+            {
+                "market_id": result["market_id"],
+                "pair_market_id": result["pair_market_id"],
+                "considered_points": result["considered_points"],
+                "traded_points": result["traded_points"],
+                "filled_notional_usd": result["filled_notional_usd"],
+                "pnl_usd": result["pnl_usd"],
+            }
+        )
+        considered += int(result["considered_points"])
+        traded += int(result["traded_points"])
+        total_notional += float(result["filled_notional_usd"])
+        event_pnls.extend(result["event_pnls"])
+
+    equity_curve = [p.bankroll_usd]
+    equity = p.bankroll_usd
+    for event_pnl in event_pnls:
+        equity += event_pnl
+        equity_curve.append(equity)
+
+    total_pnl = equity - p.bankroll_usd
+    total_return_pct = (total_pnl / p.bankroll_usd) * 100.0
+    max_drawdown_usd, max_drawdown_pct = _max_drawdown_stats(equity_curve)
+    # UI-facing percentages should not report losses below -100% or drawdowns above 100%.
+    display_total_return_pct = max(total_return_pct, -100.0)
+    display_max_drawdown_pct = min(max_drawdown_pct, 100.0)
+    events = len(event_pnls)
+    hit_rate_pct = ((sum(1 for pnl in event_pnls if pnl > 0.0) / events) * 100.0) if events else 0.0
+    annualized_return_pct = _annualized_return_pct(starting=p.bankroll_usd, ending=equity, days=days)
+    sharpe_like = _sharpe_like_score(event_pnls=event_pnls, bankroll_usd=p.bankroll_usd, days=days)
+    turnover_multiple = (total_notional / p.bankroll_usd) if p.bankroll_usd > 0 else 0.0
+
+    if events < bt.min_events:
+        return {
+            "status": "error",
+            "error_code": "insufficient_sample_size",
+            "message": (
+                "Backtest blocked because event sample is too small for decision-grade metrics. "
+                f"Required at least {bt.min_events}, observed {events}."
+            ),
+            "dry_run": True,
+            "backtest_summary": {
+                "days": days,
+                "source": source,
+                "pairs_loaded": len(markets),
+                "events_observed": events,
+                "min_events_required": bt.min_events,
+            },
+            "disclaimer": DISCLAIMER,
+        }
+
+    return {
+        "status": "ok",
+        "skill": "liquidity-paired-basis-maker",
+        "mode": "backtest",
+        "dry_run": True,
+        "backtest_summary": {
+            "days": days,
+            "days_range": {"min": bt.days_min, "max": bt.days_max},
+            "start_utc": datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat(),
+            "end_utc": datetime.fromtimestamp(end_ts, tz=timezone.utc).isoformat(),
+            "source": source,
+            "pairs_selected": len(summaries),
+            "considered_points": considered,
+            "traded_points": traded,
+            "trade_rate_pct": round((traded / considered) * 100.0 if considered else 0.0, 4),
+        },
+        "results": {
+            "starting_bankroll_usd": round(p.bankroll_usd, 2),
+            "ending_bankroll_usd": round(equity, 2),
+            "total_pnl_usd": round(total_pnl, 4),
+            "return_pct": round(display_total_return_pct, 4),
+            "total_return_pct": round(display_total_return_pct, 4),
+            "annualized_return_pct": round(annualized_return_pct, 4),
+            "sharpe_like_score": round(sharpe_like, 4),
+            "hit_rate_pct": round(hit_rate_pct, 4),
+            "filled_notional_usd": round(total_notional, 2),
+            "turnover_multiple": round(turnover_multiple, 4),
+            "events": events,
+            "min_events_required": bt.min_events,
+            "max_drawdown_usd": round(max_drawdown_usd, 4),
+            "max_drawdown_pct": round(display_max_drawdown_pct, 4),
+            "decision_hint": "consider_trade_mode" if total_pnl > 0 else "paper_only_or_tune",
+        },
+        "pairs": sorted(summaries, key=lambda row: row["pnl_usd"], reverse=True),
+        "disclaimer": DISCLAIMER,
+    }
+
+
+def _load_trade_markets(config: dict[str, Any], markets_file: str | None) -> list[dict[str, Any]]:
+    if markets_file:
+        payload = load_json(Path(markets_file))
+    else:
+        payload = config.get("markets", [])
+
+    if isinstance(payload, dict):
+        rows = payload.get("markets", [])
+    elif isinstance(payload, list):
+        rows = payload
+    else:
+        rows = []
+
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _build_pair_trade(market: dict[str, Any], leg_exposure: dict[str, float], total_notional: float, p: StrategyParams) -> dict[str, Any]:
+    market_id = _safe_str(market.get("market_id"), "unknown")
+    pair_market_id = _safe_str(market.get("pair_market_id"), f"{market_id}-pair")
+    mid = _safe_float(market.get("mid_price"), -1.0)
+    pair_mid = _safe_float(market.get("pair_mid_price"), -1.0)
+    ttl = max(0, _safe_int(market.get("seconds_to_resolution"), 0))
+
+    if ttl < p.min_seconds_to_resolution:
+        return {"market_id": market_id, "status": "skipped", "reason": "near_resolution"}
+    if not (0.01 < mid < 0.99 and 0.01 < pair_mid < 0.99):
+        return {"market_id": market_id, "status": "skipped", "reason": "invalid_mid_prices"}
+
+    basis_bps = (mid - pair_mid) * 10000.0
+    abs_basis = abs(basis_bps)
+    if abs_basis < p.basis_entry_bps:
+        return {
+            "market_id": market_id,
+            "status": "skipped",
+            "reason": "basis_below_entry_threshold",
+            "basis_bps": round(basis_bps, 3),
+        }
+
+    expected_convergence_bps = abs_basis * p.expected_convergence_ratio
+    edge_bps = expected_convergence_bps + p.maker_rebate_bps - p.expected_unwind_cost_bps - p.adverse_selection_bps
+    if edge_bps < p.min_edge_bps:
+        return {
+            "market_id": market_id,
+            "status": "skipped",
+            "reason": "negative_or_thin_edge",
+            "basis_bps": round(basis_bps, 3),
+            "edge_bps": round(edge_bps, 3),
+        }
+
+    target_notional = p.base_pair_notional_usd * min(1.8, abs_basis / p.basis_entry_bps)
+    remaining_total = max(0.0, p.max_total_notional_usd - max(total_notional, 0.0))
+    remaining_pair = max(
+        0.0,
+        p.max_notional_per_pair_usd
+        - max(abs(leg_exposure.get(market_id, 0.0)), abs(leg_exposure.get(pair_market_id, 0.0))),
+    )
+    quote_notional = min(target_notional, remaining_total, remaining_pair)
+    if quote_notional <= 0:
+        return {"market_id": market_id, "status": "skipped", "reason": "risk_capacity_exhausted"}
+
+    primary_bias = "sell_primary_buy_pair" if basis_bps > 0 else "buy_primary_sell_pair"
+    primary_side = "SELL" if basis_bps > 0 else "BUY"
+    pair_side = "BUY" if basis_bps > 0 else "SELL"
+
+    return {
+        "market_id": market_id,
+        "pair_market_id": pair_market_id,
+        "status": "quoted",
+        "basis_bps": round(basis_bps, 3),
+        "expected_convergence_bps": round(expected_convergence_bps, 3),
+        "edge_bps": round(edge_bps, 3),
+        "trade_bias": primary_bias,
+        "pair_notional_usd": round(quote_notional, 2),
+        "legs": [
+            {"market_id": market_id, "side": primary_side, "notional_usd": round(quote_notional, 2)},
+            {"market_id": pair_market_id, "side": pair_side, "notional_usd": round(quote_notional, 2)},
+        ],
+    }
+
+
+def run_trade(config: dict[str, Any], markets_file: str | None, yes_live: bool) -> dict[str, Any]:
+    execution = config.get("execution", {}) if isinstance(config.get("execution"), dict) else {}
+    dry_run = bool(execution.get("dry_run", True))
+    live_mode = bool(execution.get("live_mode", False))
+
+    if live_mode and not yes_live:
+        return {
+            "status": "error",
+            "error_code": "live_confirmation_required",
+            "message": "Set --yes-live with execution.live_mode=true for live orders.",
+            "dry_run": True,
+            "disclaimer": DISCLAIMER,
+        }
+    if live_mode and dry_run:
+        return {
+            "status": "error",
+            "error_code": "invalid_execution_mode",
+            "message": "dry_run must be false when live_mode is true.",
+            "dry_run": True,
+            "disclaimer": DISCLAIMER,
+        }
+
+    p = to_strategy_params(config)
+    exposure = config.get("state", {}).get("leg_exposure", {})
+    leg_exposure = {str(k): _safe_float(v, 0.0) for k, v in exposure.items()}
+    markets = _load_trade_markets(config, markets_file)
+
+    trades: list[dict[str, Any]] = []
+    skips: list[dict[str, Any]] = []
+    total_notional = 0.0
+
+    for market in markets:
+        if len(trades) >= p.pairs_max:
+            break
+        market_id = _safe_str(market.get("market_id"), "unknown")
+        proposal = _build_pair_trade(
+            market=market,
+            leg_exposure=leg_exposure,
+            total_notional=total_notional,
+            p=p,
+        )
+        if proposal.get("status") == "quoted":
+            trades.append(proposal)
+            total_notional += float(proposal["pair_notional_usd"])
+        else:
+            skips.append(
+                {
+                    "market_id": market_id,
+                    "reason": _safe_str(proposal.get("reason"), "unknown"),
+                    "basis_bps": proposal.get("basis_bps"),
+                    "edge_bps": proposal.get("edge_bps"),
+                }
+            )
+
+    mode = "live" if live_mode and yes_live and not dry_run else "dry-run"
+    return {
+        "status": "ok",
+        "skill": "liquidity-paired-basis-maker",
+        "mode": mode,
+        "dry_run": mode != "live",
+        "strategy_summary": {
+            "pairs_considered": len(markets),
+            "pairs_quoted": len(trades),
+            "pairs_skipped": len(skips),
+            "total_pair_notional_usd": round(total_notional, 2),
+            "basis_entry_bps": p.basis_entry_bps,
+            "basis_exit_bps": p.basis_exit_bps,
+        },
+        "pair_trades": trades,
+        "skips": skips,
+        "disclaimer": DISCLAIMER,
+    }
+
+
+def main() -> int:
+    args = parse_args()
+    config = load_config(args.config)
+
+    backtest = run_backtest(
+        config=config,
+        backtest_days=args.backtest_days,
+    )
+    if backtest.get("status") != "ok":
+        print(json.dumps(backtest, sort_keys=True))
+        return 1
+
+    if args.run_type == "backtest":
+        print(json.dumps(backtest, sort_keys=True))
+        return 0
+
+    execution = config.get("execution", {}) if isinstance(config.get("execution"), dict) else {}
+    require_positive = bool(execution.get("require_positive_backtest", True))
+    return_pct = _safe_float(backtest.get("results", {}).get("return_pct"), 0.0)
+    if require_positive and return_pct <= 0.0 and not args.allow_negative_backtest:
+        payload = {
+            "status": "error",
+            "error_code": "backtest_gate_blocked",
+            "message": (
+                "Trade mode blocked because backtest return_pct <= 0. "
+                "Use --allow-negative-backtest to override."
+            ),
+            "backtest": backtest,
+            "disclaimer": DISCLAIMER,
+            "dry_run": True,
+        }
+        print(json.dumps(payload, sort_keys=True))
+        return 1
+
+    trade = run_trade(config=config, markets_file=args.markets_file, yes_live=args.yes_live)
+    ok = trade.get("status") == "ok"
+    payload = {
+        "status": "ok" if ok else "error",
+        "skill": "liquidity-paired-basis-maker",
+        "run_type": "trade",
+        "backtest": backtest,
+        "trade": trade,
+        "disclaimer": DISCLAIMER,
+    }
+    print(json.dumps(payload, sort_keys=True))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
