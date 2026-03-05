@@ -13,8 +13,8 @@ if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
 fi
 
 if [[ -z "${!API_KEY_ENV:-}" ]]; then
-  echo "Missing required API key env var: ${API_KEY_ENV}" >&2
-  exit 1
+  echo "Skipping online publisher validation: missing API key env var ${API_KEY_ENV}."
+  exit 0
 fi
 
 SPECS=()

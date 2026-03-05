@@ -34,7 +34,6 @@ jobs:
         run: make check-generated PYTHON=python
 
       - name: Online publisher validation
-        if: ${{ secrets.SEREN_API_KEY != '' }}
         env:
           SEREN_API_KEY: ${{ secrets.SEREN_API_KEY }}
           SEREN_GATEWAY_URL: https://api.serendb.com
