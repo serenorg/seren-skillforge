@@ -5,31 +5,35 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import select
-import shlex
-import subprocess
+import math
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import pstdev
 from typing import Any
-from urllib.parse import urlencode, urlparse
-from urllib.request import Request, urlopen
 
-SEREN_POLYMARKET_PUBLISHER_HOST = "api.serendb.com"
-SEREN_PUBLISHERS_PREFIX = "/publishers/"
-SEREN_POLYMARKET_DATA_PUBLISHER = "polymarket-data"
-SEREN_POLYMARKET_TRADING_PUBLISHER = "polymarket-trading-serenai"
-SEREN_POLYMARKET_DATA_URL_PREFIX = (
-    f"https://{SEREN_POLYMARKET_PUBLISHER_HOST}{SEREN_PUBLISHERS_PREFIX}{SEREN_POLYMARKET_DATA_PUBLISHER}"
-)
-SEREN_POLYMARKET_TRADING_URL_PREFIX = (
-    f"https://{SEREN_POLYMARKET_PUBLISHER_HOST}{SEREN_PUBLISHERS_PREFIX}{SEREN_POLYMARKET_TRADING_PUBLISHER}"
-)
-SEREN_ALLOWED_POLYMARKET_PUBLISHERS = frozenset(
-    {SEREN_POLYMARKET_DATA_PUBLISHER, SEREN_POLYMARKET_TRADING_PUBLISHER}
+
+def _shared_artifacts_dir() -> Path:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "shared" / "polymarket_cli.py"
+        if candidate.exists():
+            return candidate.parent
+    raise RuntimeError("Unable to locate artifacts/shared/polymarket_cli.py")
+
+
+SHARED_DIR = _shared_artifacts_dir()
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
+
+from polymarket_cli import (  # noqa: E402
+    PolymarketCliConfig,
+    cli_get_book,
+    cli_get_markets,
+    cli_get_prices_history,
+    load_polymarket_cli_config,
 )
 
 
@@ -61,8 +65,37 @@ class BacktestParams:
     min_liquidity_usd: float = 100000.0
     markets_fetch_limit: int = 300
     min_history_points: int = 480
-    gamma_markets_url: str = f"{SEREN_POLYMARKET_DATA_URL_PREFIX}/markets"
-    clob_history_url: str = f"{SEREN_POLYMARKET_TRADING_URL_PREFIX}/prices-history"
+    require_orderbook_history: bool = False
+    spread_decay_bps: float = 45.0
+    join_best_queue_factor: float = 0.85
+    off_best_queue_factor: float = 0.35
+    synthetic_orderbook_half_spread_bps: float = 18.0
+    synthetic_orderbook_depth_usd: float = 125.0
+    telemetry_path: str = ""
+
+
+@dataclass(frozen=True)
+class OrderBookSnapshot:
+    t: int
+    best_bid: float
+    best_ask: float
+    bid_size_usd: float
+    ask_size_usd: float
+
+
+@dataclass(frozen=True)
+class QuotePlan:
+    status: str
+    market_id: str
+    edge_bps: float
+    spread_bps: float
+    rebate_bps: float
+    bid_price: float = 0.0
+    ask_price: float = 0.0
+    bid_notional_usd: float = 0.0
+    ask_notional_usd: float = 0.0
+    inventory_notional_usd: float = 0.0
+    reason: str = ""
 
 
 def parse_args() -> argparse.Namespace:
@@ -143,6 +176,20 @@ def _safe_str(value: Any, default: str = "") -> str:
     return str(value)
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
 def to_params(config: dict[str, Any]) -> StrategyParams:
     strategy = config.get("strategy", {})
     return StrategyParams(
@@ -181,15 +228,32 @@ def to_backtest_params(config: dict[str, Any]) -> BacktestParams:
         min_liquidity_usd=max(0.0, _safe_float(backtest.get("min_liquidity_usd"), 100000.0)),
         markets_fetch_limit=max(1, _safe_int(backtest.get("markets_fetch_limit"), 300)),
         min_history_points=max(10, _safe_int(backtest.get("min_history_points"), 480)),
-        gamma_markets_url=_safe_str(
-            backtest.get("gamma_markets_url"),
-            f"{SEREN_POLYMARKET_DATA_URL_PREFIX}/markets",
+        require_orderbook_history=_safe_bool(backtest.get("require_orderbook_history"), False),
+        spread_decay_bps=max(1.0, _safe_float(backtest.get("spread_decay_bps"), 45.0)),
+        join_best_queue_factor=clamp(
+            _safe_float(backtest.get("join_best_queue_factor"), 0.85),
+            0.0,
+            1.0,
         ),
-        clob_history_url=_safe_str(
-            backtest.get("clob_history_url"),
-            f"{SEREN_POLYMARKET_TRADING_URL_PREFIX}/prices-history",
+        off_best_queue_factor=clamp(
+            _safe_float(backtest.get("off_best_queue_factor"), 0.35),
+            0.0,
+            1.0,
         ),
+        synthetic_orderbook_half_spread_bps=max(
+            1.0,
+            _safe_float(backtest.get("synthetic_orderbook_half_spread_bps"), 18.0),
+        ),
+        synthetic_orderbook_depth_usd=max(
+            1.0,
+            _safe_float(backtest.get("synthetic_orderbook_depth_usd"), 125.0),
+        ),
+        telemetry_path=_safe_str(backtest.get("telemetry_path"), ""),
     )
+
+
+def to_polymarket_cli_config(config: dict[str, Any]) -> PolymarketCliConfig:
+    return load_polymarket_cli_config(config.get("polymarket_cli"))
 
 
 def compute_spread_bps(volatility_bps: float, p: StrategyParams) -> float:
@@ -242,246 +306,96 @@ def _json_to_list(value: Any) -> list[Any]:
     return []
 
 
-def _is_truthy(value: str | None) -> bool:
-    if value is None:
-        return False
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+def _extract_size_usd(raw: dict[str, Any], price: float) -> float:
+    direct = _safe_float(raw.get("size_usd"), -1.0)
+    if direct >= 0.0:
+        return direct
+    size = _safe_float(
+        raw.get("size", raw.get("quantity", raw.get("amount", raw.get("shares", 0.0)))),
+        0.0,
+    )
+    if size <= 0.0:
+        return 0.0
+    if price <= 0.0:
+        return size
+    return size * price
 
 
-def _seren_publisher_target(url: str) -> tuple[str, str]:
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.netloc != SEREN_POLYMARKET_PUBLISHER_HOST:
-        raise ValueError(
-            "Backtest URL must use Seren Polymarket Publisher host "
-            f"'https://{SEREN_POLYMARKET_PUBLISHER_HOST}'."
-        )
-    if not parsed.path.startswith(SEREN_PUBLISHERS_PREFIX):
-        raise ValueError(
-            "Backtest URL must use a supported Seren Polymarket Publisher URL prefix "
-            f"('{SEREN_POLYMARKET_DATA_URL_PREFIX}/...' or '{SEREN_POLYMARKET_TRADING_URL_PREFIX}/...')."
-        )
-    path_without_prefix = parsed.path[len(SEREN_PUBLISHERS_PREFIX) :]
-    publisher_slug, _, remainder = path_without_prefix.partition("/")
-    if publisher_slug not in SEREN_ALLOWED_POLYMARKET_PUBLISHERS:
-        raise ValueError(
-            "Backtest URL must use a supported Polymarket publisher "
-            f"({', '.join(sorted(SEREN_ALLOWED_POLYMARKET_PUBLISHERS))})."
-        )
-    publisher_path = f"/{remainder}" if remainder else "/"
-    if parsed.query:
-        publisher_path = f"{publisher_path}?{parsed.query}"
-    return publisher_slug, publisher_path
+def _top_level_price(levels: Any, fallback_key: str) -> tuple[float, float]:
+    if isinstance(levels, list) and levels:
+        first = levels[0]
+        if isinstance(first, dict):
+            price = _safe_float(first.get("price"), -1.0)
+            size_usd = _extract_size_usd(first, price=max(price, 0.0))
+            return price, size_usd
+    return -1.0, 0.0
 
 
-def _read_mcp_exact(fd: int, size: int, timeout_seconds: float) -> bytes:
-    buf = bytearray()
-    while len(buf) < size:
-        ready, _, _ = select.select([fd], [], [], timeout_seconds)
-        if not ready:
-            raise TimeoutError("Timed out waiting for response from seren-mcp.")
-        chunk = os.read(fd, size - len(buf))
-        if not chunk:
-            raise RuntimeError("seren-mcp closed stdout before completing a response.")
-        buf.extend(chunk)
-    return bytes(buf)
-
-
-def _read_mcp_message(proc: subprocess.Popen[bytes], timeout_seconds: float) -> dict[str, Any]:
-    if proc.stdout is None:
-        raise RuntimeError("seren-mcp stdout is not available.")
-    fd = proc.stdout.fileno()
-    header_buf = bytearray()
-    while b"\r\n\r\n" not in header_buf:
-        header_buf.extend(_read_mcp_exact(fd, 1, timeout_seconds))
-        if len(header_buf) > 16384:
-            raise RuntimeError("Invalid MCP header: too large.")
-    header_raw, _ = header_buf.split(b"\r\n\r\n", 1)
-    headers: dict[str, str] = {}
-    for line in header_raw.decode("ascii", errors="ignore").split("\r\n"):
-        if ":" not in line:
-            continue
-        k, v = line.split(":", 1)
-        headers[k.strip().lower()] = v.strip()
-    content_length = _safe_int(headers.get("content-length"), -1)
-    if content_length < 0:
-        raise RuntimeError("Invalid MCP header: missing content-length.")
-    body = _read_mcp_exact(fd, content_length, timeout_seconds)
-    parsed = json.loads(body.decode("utf-8"))
-    if not isinstance(parsed, dict):
-        raise RuntimeError("Invalid MCP response payload.")
-    return parsed
-
-
-def _write_mcp_message(proc: subprocess.Popen[bytes], payload: dict[str, Any]) -> None:
-    if proc.stdin is None:
-        raise RuntimeError("seren-mcp stdin is not available.")
-    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
-    proc.stdin.write(header)
-    proc.stdin.write(body)
-    proc.stdin.flush()
-
-
-def _mcp_request(
-    proc: subprocess.Popen[bytes],
-    request_id: int,
-    method: str,
-    params: dict[str, Any] | None,
-    timeout_seconds: float,
-) -> dict[str, Any]:
-    request: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
-    if params is not None:
-        request["params"] = params
-    _write_mcp_message(proc, request)
-    while True:
-        message = _read_mcp_message(proc, timeout_seconds)
-        if message.get("id") != request_id:
-            continue
-        error = message.get("error")
-        if isinstance(error, dict):
-            raise RuntimeError(_safe_str(error.get("message"), "MCP request failed."))
-        result = message.get("result")
-        if isinstance(result, dict):
-            return result
-        return {"value": result}
-
-
-def _extract_call_publisher_body(result: dict[str, Any]) -> dict[str, Any] | list[Any]:
-    structured = result.get("structuredContent")
-    if isinstance(structured, dict):
-        body = structured.get("body")
-        if isinstance(body, dict | list):
-            return body
-        if isinstance(structured, dict | list):
-            return structured
-
-    content = result.get("content")
-    if isinstance(content, list):
-        for item in content:
+def _normalize_orderbook_snapshots(
+    raw_snapshots: Any,
+    history: list[tuple[int, float]],
+    bt: BacktestParams,
+) -> tuple[dict[int, OrderBookSnapshot], str]:
+    snapshots: dict[int, OrderBookSnapshot] = {}
+    if isinstance(raw_snapshots, list):
+        for item in raw_snapshots:
             if not isinstance(item, dict):
                 continue
-            if _safe_str(item.get("type"), "") != "text":
+            ts = _safe_int(item.get("t"), -1)
+            if ts < 0:
                 continue
-            text = _safe_str(item.get("text"), "")
-            if not text:
+            best_bid = _safe_float(item.get("best_bid"), -1.0)
+            best_ask = _safe_float(item.get("best_ask"), -1.0)
+            bid_size_usd = _safe_float(item.get("bid_size_usd"), -1.0)
+            ask_size_usd = _safe_float(item.get("ask_size_usd"), -1.0)
+            if best_bid < 0.0:
+                best_bid, inferred_size = _top_level_price(item.get("bids"), "best_bid")
+                if bid_size_usd < 0.0:
+                    bid_size_usd = inferred_size
+            if best_ask < 0.0:
+                best_ask, inferred_size = _top_level_price(item.get("asks"), "best_ask")
+                if ask_size_usd < 0.0:
+                    ask_size_usd = inferred_size
+            if best_bid < 0.0 or best_ask < 0.0 or best_bid > best_ask:
                 continue
-            try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                body = parsed.get("body")
-                if isinstance(body, dict | list):
-                    return body
-                return parsed
-            if isinstance(parsed, list):
-                return parsed
-    if isinstance(result.get("body"), dict | list):
-        return result["body"]
-    raise RuntimeError("Unable to parse call_publisher MCP response payload.")
+            snapshots[ts] = OrderBookSnapshot(
+                t=ts,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                bid_size_usd=max(0.0, bid_size_usd),
+                ask_size_usd=max(0.0, ask_size_usd),
+            )
+    if snapshots:
+        return snapshots, "historical"
 
-
-def _http_get_json_via_mcp(url: str, timeout: int = 30) -> dict[str, Any] | list[Any]:
-    publisher_slug, publisher_path = _seren_publisher_target(url)
-    command_raw = _safe_str(os.getenv("SEREN_MCP_COMMAND"), "seren-mcp").strip() or "seren-mcp"
-    command = shlex.split(command_raw)
-    if not command:
-        raise RuntimeError("SEREN_MCP_COMMAND is empty.")
-
-    timeout_seconds = max(1.0, float(timeout))
-    proc = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        _mcp_request(
-            proc=proc,
-            request_id=1,
-            method="initialize",
-            params={
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "polymarket-maker-rebate-bot", "version": "1.1"},
-            },
-            timeout_seconds=timeout_seconds,
+    if bt.require_orderbook_history:
+        raise RuntimeError(
+            "Stateful backtest requires historical order-book snapshots. "
+            "Provide orderbooks in --backtest-file / backtest_markets or disable require_orderbook_history."
         )
-        _write_mcp_message(
-            proc,
-            {
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-                "params": {},
-            },
+
+    synthetic: dict[int, OrderBookSnapshot] = {}
+    half_spread = bt.synthetic_orderbook_half_spread_bps / 10000.0
+    for ts, mid in history:
+        synthetic[ts] = OrderBookSnapshot(
+            t=ts,
+            best_bid=clamp(mid - half_spread, 0.001, 0.999),
+            best_ask=clamp(mid + half_spread, 0.001, 0.999),
+            bid_size_usd=bt.synthetic_orderbook_depth_usd,
+            ask_size_usd=bt.synthetic_orderbook_depth_usd,
         )
-        result = _mcp_request(
-            proc=proc,
-            request_id=2,
-            method="tools/call",
-            params={
-                "name": "call_publisher",
-                "arguments": {
-                    "publisher": publisher_slug,
-                    "method": "GET",
-                    "path": publisher_path,
-                    "response_format": "json",
-                },
-            },
-            timeout_seconds=timeout_seconds,
-        )
-        return _extract_call_publisher_body(result)
-    finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=1)
+    return synthetic, "synthetic"
 
 
-def _http_get_json_via_api_key(url: str, api_key: str, timeout: int = 30) -> dict[str, Any] | list[Any]:
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "seren-maker-rebate-bot/1.0",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-    )
-    with urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def _http_get_json(url: str, timeout: int = 30) -> dict[str, Any] | list[Any]:
-    _seren_publisher_target(url)
-
-    api_key = _safe_str(os.getenv("SEREN_API_KEY"), "").strip()
-    prefer_mcp = _is_truthy(os.getenv("SEREN_USE_MCP")) or not api_key
-    mcp_error: Exception | None = None
-
-    if prefer_mcp:
-        try:
-            return _http_get_json_via_mcp(url, timeout=timeout)
-        except Exception as exc:
-            mcp_error = exc
-            if not api_key:
-                raise RuntimeError(
-                    "Failed to fetch Polymarket data from Seren MCP. "
-                    "Ensure Seren Desktop is logged in (or set SEREN_MCP_COMMAND), "
-                    "or provide SEREN_API_KEY for direct gateway auth "
-                    "(missing_seren_api_key)."
-                ) from exc
-
-    try:
-        return _http_get_json_via_api_key(url, api_key=api_key, timeout=timeout)
-    except Exception as exc:
-        if mcp_error is not None:
-            raise RuntimeError(
-                f"Failed via MCP ({mcp_error}) and API key fallback ({exc})."
-            ) from exc
-        raise
+def _write_telemetry_records(path: str, records: list[dict[str, Any]]) -> None:
+    if not path or not records:
+        return
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, sort_keys=True))
+            handle.write("\n")
 
 
 def _normalize_history(
@@ -517,6 +431,7 @@ def _load_markets_from_fixture(
     payload: dict[str, Any] | list[Any],
     start_ts: int,
     end_ts: int,
+    backtest_params: BacktestParams,
 ) -> list[dict[str, Any]]:
     raw_markets: list[Any]
     if isinstance(payload, dict):
@@ -537,6 +452,11 @@ def _load_markets_from_fixture(
         )
         if len(history) < 2:
             continue
+        orderbooks, orderbook_mode = _normalize_orderbook_snapshots(
+            raw_snapshots=raw.get("orderbooks", raw.get("book_history")),
+            history=history,
+            bt=backtest_params,
+        )
         market_id = _safe_str(raw.get("market_id"), _safe_str(raw.get("token_id"), "unknown"))
         markets.append(
             {
@@ -546,28 +466,78 @@ def _load_markets_from_fixture(
                 "end_ts": _safe_int(raw.get("end_ts"), _parse_iso_ts(raw.get("endDate")) or 0),
                 "rebate_bps": _safe_float(raw.get("rebate_bps"), 0.0),
                 "history": history,
+                "orderbooks": orderbooks,
+                "orderbook_mode": orderbook_mode,
                 "source": "fixture",
             }
         )
     return markets
 
 
+def _snapshot_from_live_book(
+    payload: dict[str, Any] | list[Any] | None,
+    history: list[tuple[int, float]],
+    bt: BacktestParams,
+) -> dict[int, OrderBookSnapshot]:
+    if not history:
+        return {}
+    last_ts, last_mid = history[-1]
+    best_bid = -1.0
+    best_ask = -1.0
+    bid_size = 0.0
+    ask_size = 0.0
+    if isinstance(payload, dict):
+        best_bid = _safe_float(payload.get("best_bid", payload.get("bid")), -1.0)
+        best_ask = _safe_float(payload.get("best_ask", payload.get("ask")), -1.0)
+        bid_size = _safe_float(payload.get("bid_size_usd"), -1.0)
+        ask_size = _safe_float(payload.get("ask_size_usd"), -1.0)
+        if best_bid < 0.0:
+            best_bid, inferred = _top_level_price(payload.get("bids"), "best_bid")
+            if bid_size < 0.0:
+                bid_size = inferred
+        if best_ask < 0.0:
+            best_ask, inferred = _top_level_price(payload.get("asks"), "best_ask")
+            if ask_size < 0.0:
+                ask_size = inferred
+    if best_bid < 0.0 or best_ask < 0.0 or best_bid >= best_ask:
+        synthetic, _ = _normalize_orderbook_snapshots([], history=history, bt=bt)
+        return synthetic
+
+    half_spread = max((best_ask - best_bid) / 2.0, bt.synthetic_orderbook_half_spread_bps / 10000.0)
+    reference_bid_size = max(0.0, bid_size) or bt.synthetic_orderbook_depth_usd
+    reference_ask_size = max(0.0, ask_size) or bt.synthetic_orderbook_depth_usd
+    snapshots: dict[int, OrderBookSnapshot] = {}
+    for ts, mid in history:
+        snapshots[ts] = OrderBookSnapshot(
+            t=ts,
+            best_bid=clamp(mid - half_spread, 0.001, 0.999),
+            best_ask=clamp(mid + half_spread, 0.001, 0.999),
+            bid_size_usd=reference_bid_size,
+            ask_size_usd=reference_ask_size,
+        )
+    return snapshots
+
+
 def _fetch_live_markets(
     strategy_params: StrategyParams,
     backtest_params: BacktestParams,
+    cli_config: PolymarketCliConfig,
     start_ts: int,
     end_ts: int,
 ) -> list[dict[str, Any]]:
-    query = urlencode(
-        {
-            "active": "true",
-            "closed": "false",
-            "limit": backtest_params.markets_fetch_limit,
-            "order": "volume24hr",
-            "ascending": "false",
-        }
+    if backtest_params.require_orderbook_history:
+        raise RuntimeError(
+            "Historical order-book replay is required. Provide --backtest-file or backtest_markets "
+            "with orderbooks because live CLI fetch does not supply historical book snapshots."
+        )
+    raw = cli_get_markets(
+        cli_config,
+        limit=backtest_params.markets_fetch_limit,
+        order="volume24hr",
+        ascending=False,
+        active=True,
+        closed=False,
     )
-    raw = _http_get_json(f"{backtest_params.gamma_markets_url}?{query}")
     if not isinstance(raw, list):
         return []
 
@@ -602,14 +572,12 @@ def _fetch_live_markets(
     for candidate in candidates:
         if len(selected) >= strategy_params.markets_max:
             break
-        history_query = urlencode(
-            {
-                "market": candidate["token_id"],
-                "interval": "max",
-                "fidelity": backtest_params.fidelity_minutes,
-            }
+        payload = cli_get_prices_history(
+            cli_config,
+            market=candidate["token_id"],
+            interval="max",
+            fidelity=backtest_params.fidelity_minutes,
         )
-        payload = _http_get_json(f"{backtest_params.clob_history_url}?{history_query}")
         if not isinstance(payload, dict):
             continue
         history = _normalize_history(
@@ -619,11 +587,23 @@ def _fetch_live_markets(
         )
         if len(history) < backtest_params.min_history_points:
             continue
+        book_payload: dict[str, Any] | list[Any] | None
+        try:
+            book_payload = cli_get_book(cli_config, token_id=candidate["token_id"])
+        except Exception:
+            book_payload = None
+        orderbooks = _snapshot_from_live_book(
+            payload=book_payload,
+            history=history,
+            bt=backtest_params,
+        )
         selected.append(
             {
                 **candidate,
                 "history": history,
-                "source": "live-seren-publisher",
+                "orderbooks": orderbooks,
+                "orderbook_mode": "synthetic-from-cli-book",
+                "source": "live-polymarket-cli",
             }
         )
     return selected
@@ -639,12 +619,160 @@ def _max_drawdown(equity_curve: list[float]) -> float:
     return max_dd
 
 
+def _build_quote_plan(
+    market_id: str,
+    mid: float,
+    vol_bps: float,
+    rebate_bps: float,
+    inventory_notional: float,
+    outstanding_notional: float,
+    p: StrategyParams,
+) -> QuotePlan:
+    spread_bps = compute_spread_bps(vol_bps, p)
+    edge_bps = expected_edge_bps(spread_bps, rebate_bps, p)
+    if edge_bps < p.min_edge_bps:
+        return QuotePlan(
+            status="skipped",
+            market_id=market_id,
+            reason="negative_or_thin_edge",
+            edge_bps=round(edge_bps, 3),
+            spread_bps=round(spread_bps, 3),
+            rebate_bps=round(rebate_bps, 3),
+            inventory_notional_usd=round(inventory_notional, 2),
+        )
+
+    inventory_ratio = 0.0
+    if p.max_position_notional_usd > 0:
+        inventory_ratio = clamp(inventory_notional / p.max_position_notional_usd, -1.0, 1.0)
+    skew_bps = -inventory_ratio * p.inventory_skew_strength_bps
+    half_spread_prob = (spread_bps / 2.0) / 10000.0
+    skew_prob = skew_bps / 10000.0
+    bid_px = clamp(mid - half_spread_prob + skew_prob, 0.001, 0.999)
+    ask_px = clamp(mid + half_spread_prob + skew_prob, 0.001, 0.999)
+    if bid_px >= ask_px:
+        return QuotePlan(
+            status="skipped",
+            market_id=market_id,
+            reason="crossed_quote_after_skew",
+            edge_bps=round(edge_bps, 3),
+            spread_bps=round(spread_bps, 3),
+            rebate_bps=round(rebate_bps, 3),
+            inventory_notional_usd=round(inventory_notional, 2),
+        )
+
+    remaining_market = max(0.0, p.max_notional_per_market_usd - abs(inventory_notional))
+    remaining_total = max(0.0, p.max_total_notional_usd - max(0.0, outstanding_notional))
+    bid_position_capacity = max(0.0, p.max_position_notional_usd - inventory_notional)
+    ask_position_capacity = max(0.0, p.max_position_notional_usd + inventory_notional)
+    per_side_market_budget = remaining_market / 2.0
+    per_side_total_budget = remaining_total / 2.0
+    bid_notional = min(
+        p.base_order_notional_usd,
+        per_side_market_budget,
+        per_side_total_budget,
+        bid_position_capacity,
+    )
+    ask_notional = min(
+        p.base_order_notional_usd,
+        per_side_market_budget,
+        per_side_total_budget,
+        ask_position_capacity,
+    )
+    if bid_notional <= 0.0 and ask_notional <= 0.0:
+        return QuotePlan(
+            status="skipped",
+            market_id=market_id,
+            reason="risk_capacity_exhausted",
+            edge_bps=round(edge_bps, 3),
+            spread_bps=round(spread_bps, 3),
+            rebate_bps=round(rebate_bps, 3),
+            inventory_notional_usd=round(inventory_notional, 2),
+        )
+
+    return QuotePlan(
+        status="quoted",
+        market_id=market_id,
+        edge_bps=round(edge_bps, 3),
+        spread_bps=round(spread_bps, 3),
+        rebate_bps=round(rebate_bps, 3),
+        bid_price=round(bid_px, 4),
+        ask_price=round(ask_px, 4),
+        bid_notional_usd=round(max(0.0, bid_notional), 2),
+        ask_notional_usd=round(max(0.0, ask_notional), 2),
+        inventory_notional_usd=round(inventory_notional, 2),
+    )
+
+
+def _liquidation_equity(cash_usd: float, position_shares: float, mark_price: float, unwind_cost_bps: float) -> float:
+    inventory_value = position_shares * mark_price
+    liquidation_cost = abs(inventory_value) * unwind_cost_bps / 10000.0
+    return cash_usd + inventory_value - liquidation_cost
+
+
+def _fill_fraction(
+    *,
+    side: str,
+    quote_price: float,
+    quote_notional: float,
+    current_book: OrderBookSnapshot,
+    next_book: OrderBookSnapshot,
+    next_mid: float,
+    spread_bps: float,
+    bt: BacktestParams,
+    p: StrategyParams,
+) -> float:
+    if quote_notional <= 0.0:
+        return 0.0
+    if side == "buy":
+        touched_price = min(next_mid, next_book.best_bid)
+        touched_distance_bps = max(0.0, (quote_price - touched_price) * 10000.0)
+        displayed_size = next_book.ask_size_usd
+        queue_factor = bt.join_best_queue_factor if quote_price >= current_book.best_bid else bt.off_best_queue_factor
+    else:
+        touched_price = max(next_mid, next_book.best_ask)
+        touched_distance_bps = max(0.0, (touched_price - quote_price) * 10000.0)
+        displayed_size = next_book.bid_size_usd
+        queue_factor = bt.join_best_queue_factor if quote_price <= current_book.best_ask else bt.off_best_queue_factor
+    if touched_distance_bps <= 0.0:
+        return 0.0
+    half_spread_bps = max(spread_bps / 2.0, 1.0)
+    touch_ratio = clamp(touched_distance_bps / half_spread_bps, 0.0, 1.0)
+    spread_decay = math.exp(-max(0.0, spread_bps - p.min_spread_bps) / bt.spread_decay_bps)
+    depth_factor = clamp(displayed_size / max(quote_notional, 1e-9), 0.0, 1.0)
+    return clamp(
+        bt.participation_rate * touch_ratio * spread_decay * queue_factor * depth_factor,
+        0.0,
+        1.0,
+    )
+
+
+def _apply_fill(
+    *,
+    side: str,
+    fill_notional: float,
+    fill_price: float,
+    rebate_bps: float,
+    cash_usd: float,
+    position_shares: float,
+) -> tuple[float, float]:
+    shares = fill_notional / max(fill_price, 0.01)
+    if side == "buy":
+        cash_usd -= shares * fill_price
+        position_shares += shares
+    else:
+        cash_usd += shares * fill_price
+        position_shares -= shares
+    cash_usd += fill_notional * rebate_bps / 10000.0
+    return cash_usd, position_shares
+
+
 def _simulate_market_backtest(
     market: dict[str, Any],
     strategy_params: StrategyParams,
     backtest_params: BacktestParams,
 ) -> dict[str, Any]:
     history: list[tuple[int, float]] = market["history"]
+    orderbooks: dict[int, OrderBookSnapshot] = market.get("orderbooks", {})
     window = backtest_params.volatility_window_points
     if len(history) < window + 2:
         return {
@@ -653,76 +781,191 @@ def _simulate_market_backtest(
             "considered_points": 0,
             "quoted_points": 0,
             "skipped_points": 0,
+            "fill_events": 0,
             "filled_notional_usd": 0.0,
             "pnl_usd": 0.0,
-            "event_pnls": [],
+            "equity_curve": [strategy_params.bankroll_usd],
+            "telemetry": [],
+            "orderbook_mode": market.get("orderbook_mode", "unknown"),
         }
 
-    moves_bps = [
-        abs((history[i][1] - history[i - 1][1]) * 10000.0)
-        for i in range(1, len(history))
-    ]
     rebate_bps = _safe_float(market.get("rebate_bps"), strategy_params.default_rebate_bps)
     if rebate_bps <= 0:
         rebate_bps = strategy_params.default_rebate_bps
     end_ts = _safe_int(market.get("end_ts"), 0)
+    moves_bps = [abs((history[i][1] - history[i - 1][1]) * 10000.0) for i in range(1, len(history))]
 
+    cash_usd = strategy_params.bankroll_usd
+    position_shares = 0.0
     considered = 0
     quoted = 0
     skipped = 0
+    fill_events = 0
     filled_notional = 0.0
-    pnl = 0.0
-    event_pnls: list[float] = []
+    telemetry: list[dict[str, Any]] = []
+    equity_curve = [strategy_params.bankroll_usd]
 
     for i in range(window, len(history) - 1):
         t, mid_price = history[i]
-        _, next_price = history[i + 1]
+        next_t, next_mid = history[i + 1]
+        current_book = orderbooks.get(t)
+        next_book = orderbooks.get(next_t, current_book)
+        if current_book is None or next_book is None:
+            skipped += 1
+            continue
         considered += 1
+
+        record: dict[str, Any] = {
+            "t": t,
+            "market_id": market["market_id"],
+            "mid_price": round(mid_price, 6),
+            "next_mid_price": round(next_mid, 6),
+            "best_bid": round(current_book.best_bid, 6),
+            "best_ask": round(current_book.best_ask, 6),
+            "inventory_notional_before_usd": round(position_shares * mid_price, 6),
+            "orderbook_mode": market.get("orderbook_mode", "unknown"),
+        }
 
         if end_ts and end_ts - t < strategy_params.min_seconds_to_resolution:
             skipped += 1
+            record["status"] = "skipped"
+            record["reason"] = "near_resolution"
+            telemetry.append(record)
             continue
         if mid_price <= 0.01 or mid_price >= 0.99:
             skipped += 1
+            record["status"] = "skipped"
+            record["reason"] = "extreme_probability"
+            telemetry.append(record)
             continue
 
         vol_slice = moves_bps[i - window : i]
         vol_bps = pstdev(vol_slice) if len(vol_slice) > 1 else strategy_params.min_spread_bps
-        spread_bps = compute_spread_bps(vol_bps, strategy_params)
-        expected_edge = expected_edge_bps(spread_bps, rebate_bps, strategy_params)
-        if expected_edge < strategy_params.min_edge_bps:
+        outstanding_notional = abs(position_shares * mid_price)
+        quote_plan = _build_quote_plan(
+            market_id=_safe_str(market.get("market_id"), "unknown"),
+            mid=mid_price,
+            vol_bps=vol_bps,
+            rebate_bps=rebate_bps,
+            inventory_notional=position_shares * mid_price,
+            outstanding_notional=outstanding_notional,
+            p=strategy_params,
+        )
+        record.update(
+            {
+                "status": quote_plan.status,
+                "reason": quote_plan.reason,
+                "spread_bps": quote_plan.spread_bps,
+                "edge_bps": quote_plan.edge_bps,
+                "bid_price": quote_plan.bid_price,
+                "ask_price": quote_plan.ask_price,
+                "bid_notional_usd": quote_plan.bid_notional_usd,
+                "ask_notional_usd": quote_plan.ask_notional_usd,
+            }
+        )
+        if quote_plan.status != "quoted":
             skipped += 1
+            telemetry.append(record)
+            equity_curve.append(_liquidation_equity(cash_usd, position_shares, next_mid, strategy_params.expected_unwind_cost_bps))
             continue
 
         quoted += 1
-        half_spread_bps = spread_bps / 2.0
-        next_move_bps = abs((next_price - mid_price) * 10000.0)
-        touch_ratio = min(1.0, next_move_bps / max(half_spread_bps, 1e-9))
-        fill_fraction = backtest_params.participation_rate * touch_ratio
-        event_notional = strategy_params.base_order_notional_usd * fill_fraction
+        side: str | None = None
+        if next_mid < mid_price and quote_plan.bid_notional_usd > 0.0:
+            side = "buy"
+        elif next_mid > mid_price and quote_plan.ask_notional_usd > 0.0:
+            side = "sell"
 
-        extra_pickoff_bps = max(0.0, next_move_bps - half_spread_bps)
-        realized_edge_bps = (
-            half_spread_bps
-            + rebate_bps
-            - strategy_params.expected_unwind_cost_bps
-            - strategy_params.adverse_selection_bps
-            - extra_pickoff_bps
+        fill_fraction = 0.0
+        fill_notional = 0.0
+        fill_price = 0.0
+        previous_equity = _liquidation_equity(
+            cash_usd,
+            position_shares,
+            mid_price,
+            strategy_params.expected_unwind_cost_bps,
         )
-        event_pnl = event_notional * realized_edge_bps / 10000.0
-        filled_notional += event_notional
-        pnl += event_pnl
-        event_pnls.append(event_pnl)
+        if side == "buy":
+            fill_fraction = _fill_fraction(
+                side="buy",
+                quote_price=quote_plan.bid_price,
+                quote_notional=quote_plan.bid_notional_usd,
+                current_book=current_book,
+                next_book=next_book,
+                next_mid=next_mid,
+                spread_bps=quote_plan.spread_bps,
+                bt=backtest_params,
+                p=strategy_params,
+            )
+            fill_notional = quote_plan.bid_notional_usd * fill_fraction
+            fill_price = quote_plan.bid_price
+        elif side == "sell":
+            fill_fraction = _fill_fraction(
+                side="sell",
+                quote_price=quote_plan.ask_price,
+                quote_notional=quote_plan.ask_notional_usd,
+                current_book=current_book,
+                next_book=next_book,
+                next_mid=next_mid,
+                spread_bps=quote_plan.spread_bps,
+                bt=backtest_params,
+                p=strategy_params,
+            )
+            fill_notional = quote_plan.ask_notional_usd * fill_fraction
+            fill_price = quote_plan.ask_price
 
+        if fill_notional > 0.0 and side is not None:
+            cash_usd, position_shares = _apply_fill(
+                side=side,
+                fill_notional=fill_notional,
+                fill_price=fill_price,
+                rebate_bps=rebate_bps,
+                cash_usd=cash_usd,
+                position_shares=position_shares,
+            )
+            filled_notional += fill_notional
+            fill_events += 1
+
+        equity_after = _liquidation_equity(
+            cash_usd,
+            position_shares,
+            next_mid,
+            strategy_params.expected_unwind_cost_bps,
+        )
+        equity_curve.append(equity_after)
+        record.update(
+            {
+                "fill_side": side or "",
+                "fill_fraction": round(fill_fraction, 6),
+                "fill_notional_usd": round(fill_notional, 6),
+                "inventory_notional_after_usd": round(position_shares * next_mid, 6),
+                "equity_before_usd": round(previous_equity, 6),
+                "equity_after_usd": round(equity_after, 6),
+                "event_pnl_usd": round(equity_after - previous_equity, 6),
+            }
+        )
+        telemetry.append(record)
+
+    ending_equity = _liquidation_equity(
+        cash_usd,
+        position_shares,
+        history[-1][1],
+        strategy_params.expected_unwind_cost_bps,
+    )
+    if not equity_curve or ending_equity != equity_curve[-1]:
+        equity_curve.append(ending_equity)
     return {
         "market_id": market["market_id"],
         "question": market["question"],
         "considered_points": considered,
         "quoted_points": quoted,
         "skipped_points": skipped,
+        "fill_events": fill_events,
         "filled_notional_usd": round(filled_notional, 4),
-        "pnl_usd": round(pnl, 6),
-        "event_pnls": event_pnls,
+        "pnl_usd": round(ending_equity - strategy_params.bankroll_usd, 6),
+        "equity_curve": equity_curve,
+        "telemetry": telemetry,
+        "orderbook_mode": market.get("orderbook_mode", "unknown"),
     }
 
 
@@ -733,6 +976,7 @@ def run_backtest(
 ) -> dict[str, Any]:
     strategy_params = to_params(config)
     backtest_params = to_backtest_params(config)
+    cli_config = to_polymarket_cli_config(config)
     days = max(1, backtest_days_override or backtest_params.days)
     end_ts = int(time.time())
     start_ts = end_ts - (days * 24 * 3600)
@@ -744,6 +988,7 @@ def run_backtest(
                 payload=fixture_payload,
                 start_ts=start_ts,
                 end_ts=end_ts,
+                backtest_params=backtest_params,
             )
             source = "file"
         elif config.get("backtest_markets"):
@@ -751,16 +996,18 @@ def run_backtest(
                 payload=config.get("backtest_markets", []),
                 start_ts=start_ts,
                 end_ts=end_ts,
+                backtest_params=backtest_params,
             )
             source = "config"
         else:
             markets = _fetch_live_markets(
                 strategy_params=strategy_params,
                 backtest_params=backtest_params,
+                cli_config=cli_config,
                 start_ts=start_ts,
                 end_ts=end_ts,
             )
-            source = "live-seren-publisher"
+            source = "live-polymarket-cli"
     except Exception as exc:  # pragma: no cover - defensive runtime path
         return {
             "status": "error",
@@ -782,10 +1029,13 @@ def run_backtest(
         }
 
     market_summaries: list[dict[str, Any]] = []
-    event_pnls: list[float] = []
+    equity_curve = [strategy_params.bankroll_usd]
     total_considered = 0
     total_quoted = 0
     total_notional = 0.0
+    total_fill_events = 0
+    telemetry_records: list[dict[str, Any]] = []
+    orderbook_modes: set[str] = set()
 
     for market in markets[: strategy_params.markets_max]:
         summary = _simulate_market_backtest(
@@ -800,26 +1050,31 @@ def run_backtest(
                 "considered_points": summary["considered_points"],
                 "quoted_points": summary["quoted_points"],
                 "skipped_points": summary["skipped_points"],
+                "fill_events": summary["fill_events"],
                 "filled_notional_usd": summary["filled_notional_usd"],
                 "pnl_usd": summary["pnl_usd"],
+                "orderbook_mode": summary["orderbook_mode"],
             }
         )
         total_considered += int(summary["considered_points"])
         total_quoted += int(summary["quoted_points"])
         total_notional += float(summary["filled_notional_usd"])
-        event_pnls.extend(summary["event_pnls"])
+        total_fill_events += int(summary["fill_events"])
+        telemetry_records.extend(summary["telemetry"])
+        orderbook_modes.add(_safe_str(summary.get("orderbook_mode"), "unknown"))
+        market_equity_curve = summary["equity_curve"]
+        if len(market_equity_curve) > len(equity_curve):
+            equity_curve.extend([equity_curve[-1]] * (len(market_equity_curve) - len(equity_curve)))
+        for idx, value in enumerate(market_equity_curve):
+            if idx < len(equity_curve):
+                equity_curve[idx] += value - strategy_params.bankroll_usd
 
-    equity_curve = [strategy_params.bankroll_usd]
-    running_equity = strategy_params.bankroll_usd
-    for event_pnl in event_pnls:
-        running_equity += event_pnl
-        equity_curve.append(running_equity)
-
-    ending_equity = running_equity
+    ending_equity = equity_curve[-1]
     total_pnl = ending_equity - strategy_params.bankroll_usd
     return_pct = (total_pnl / strategy_params.bankroll_usd) * 100.0
     max_drawdown = _max_drawdown(equity_curve)
     decision = "consider_live_guarded" if total_pnl > 0 else "paper_only_or_tune"
+    _write_telemetry_records(backtest_params.telemetry_path, telemetry_records)
 
     return {
         "status": "ok",
@@ -834,6 +1089,8 @@ def run_backtest(
             "markets_selected": len(market_summaries),
             "considered_points": total_considered,
             "quoted_points": total_quoted,
+            "fill_events": total_fill_events,
+            "orderbook_mode": ",".join(sorted(orderbook_modes)),
             "quote_rate_pct": round(
                 (total_quoted / total_considered) * 100.0 if total_considered else 0.0,
                 4,
@@ -845,8 +1102,9 @@ def run_backtest(
             "total_pnl_usd": round(total_pnl, 4),
             "return_pct": round(return_pct, 4),
             "filled_notional_usd": round(total_notional, 4),
-            "events": len(event_pnls),
+            "events": total_fill_events,
             "max_drawdown_usd": round(max_drawdown, 4),
+            "telemetry_path": backtest_params.telemetry_path or None,
             "decision_hint": decision,
             "disclaimer": (
                 "Backtests are estimates and do not guarantee future performance."
@@ -871,61 +1129,35 @@ def quote_market(
     mid = _safe_float(market.get("mid_price"), 0.5)
     vol_bps = _safe_float(market.get("volatility_bps"), p.min_spread_bps)
     rebate_bps = _safe_float(market.get("rebate_bps"), p.default_rebate_bps)
-    spread_bps = compute_spread_bps(vol_bps, p)
-    edge_bps = expected_edge_bps(spread_bps, rebate_bps, p)
-
-    if edge_bps < p.min_edge_bps:
+    quote_plan = _build_quote_plan(
+        market_id=market_id,
+        mid=mid,
+        vol_bps=vol_bps,
+        rebate_bps=rebate_bps,
+        inventory_notional=inventory_notional,
+        outstanding_notional=outstanding_notional,
+        p=p,
+    )
+    if quote_plan.status != "quoted":
         return {
             "market_id": market_id,
             "status": "skipped",
-            "reason": "negative_or_thin_edge",
-            "edge_bps": round(edge_bps, 3),
+            "reason": quote_plan.reason,
+            "edge_bps": quote_plan.edge_bps,
         }
-
-    # Positive inventory -> lower ask / higher bid to de-risk longs.
-    inventory_ratio = 0.0
-    if p.max_position_notional_usd > 0:
-        inventory_ratio = clamp(
-            inventory_notional / p.max_position_notional_usd,
-            -1.0,
-            1.0,
-        )
-    skew_bps = -inventory_ratio * p.inventory_skew_strength_bps
-    half_spread_prob = (spread_bps / 2.0) / 10000.0
-    skew_prob = skew_bps / 10000.0
-
-    bid_px = clamp(mid - half_spread_prob + skew_prob, 0.001, 0.999)
-    ask_px = clamp(mid + half_spread_prob + skew_prob, 0.001, 0.999)
-    if bid_px >= ask_px:
-        return {
-            "market_id": market_id,
-            "status": "skipped",
-            "reason": "crossed_quote_after_skew",
-            "edge_bps": round(edge_bps, 3),
-        }
-
-    remaining_market = max(0.0, p.max_notional_per_market_usd - abs(inventory_notional))
-    remaining_total = max(0.0, p.max_total_notional_usd - max(0.0, outstanding_notional))
-    quote_notional = min(p.base_order_notional_usd, remaining_market, remaining_total)
-
-    if quote_notional <= 0:
-        return {
-            "market_id": market_id,
-            "status": "skipped",
-            "reason": "risk_capacity_exhausted",
-            "edge_bps": round(edge_bps, 3),
-        }
-
+    total_notional = quote_plan.bid_notional_usd + quote_plan.ask_notional_usd
     return {
         "market_id": market_id,
-        "status": "quoted",
-        "edge_bps": round(edge_bps, 3),
-        "spread_bps": round(spread_bps, 3),
-        "rebate_bps": round(rebate_bps, 3),
-        "quote_notional_usd": round(quote_notional, 2),
-        "bid_price": round(bid_px, 4),
-        "ask_price": round(ask_px, 4),
-        "inventory_notional_usd": round(inventory_notional, 2),
+        "status": quote_plan.status,
+        "edge_bps": quote_plan.edge_bps,
+        "spread_bps": quote_plan.spread_bps,
+        "rebate_bps": quote_plan.rebate_bps,
+        "quote_notional_usd": round(total_notional, 2),
+        "bid_notional_usd": quote_plan.bid_notional_usd,
+        "ask_notional_usd": quote_plan.ask_notional_usd,
+        "bid_price": quote_plan.bid_price,
+        "ask_price": quote_plan.ask_price,
+        "inventory_notional_usd": quote_plan.inventory_notional_usd,
     }
 
 

@@ -1,4 +1,4 @@
-name: Enforce Seren Polymarket Publisher
+name: Enforce Polymarket CLI Runtime
 
 on:
   pull_request:
@@ -7,47 +7,59 @@ on:
       - main
 
 jobs:
-  enforce-publisher:
+  enforce-polymarket-cli:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Block Direct Polymarket API Usage
+      - name: Block Inactive Polymarket Trading Publisher
         run: |
           set -euo pipefail
-          if git grep -nE 'https://gamma-api\.polymarket\.com|https://clob\.polymarket\.com' -- \
+          if git grep -n 'polymarket-trading-serenai' -- \
             'artifacts/**/*.py' \
             'artifacts/**/*.json' \
             'artifacts/**/*.md' \
-            'artifacts/**/*.yaml' \
-            'artifacts/**/*.yml'
+            '.github/workflows/*.yml'
           then
-            echo "Direct Polymarket API URLs are forbidden. Use Seren Polymarket Publisher only."
+            echo "Inactive polymarket-trading-serenai publisher references are forbidden."
             exit 1
           fi
 
-      - name: Enforce Publisher Defaults In Config
+      - name: Restrict Direct Polymarket API URLs To Shared CLI And Config
         run: |
           set -euo pipefail
-          config_path='artifacts/polymarket-maker-rebate-bot/config.example.json'
-          test -f "${config_path}"
+          tmp_matches="$(mktemp)"
+          git grep -nE 'https://gamma-api\.polymarket\.com|https://clob\.polymarket\.com' -- \
+            'artifacts/**/*.py' \
+            'artifacts/**/*.json' \
+            'artifacts/**/*.md' \
+            > "${tmp_matches}" || true
 
-          gamma_url="$(jq -r '.backtest.gamma_markets_url // empty' "${config_path}")"
-          clob_url="$(jq -r '.backtest.clob_history_url // empty' "${config_path}")"
+          if [ -s "${tmp_matches}" ]; then
+            if grep -Ev '^(artifacts/shared/polymarket_cli\.py|artifacts/polymarket-maker-rebate-bot/config\.example\.json|artifacts/polymarket/liquidity-paired-basis-maker/config\.example\.json):' "${tmp_matches}"; then
+              echo "Direct Polymarket API URLs must only live in the shared Polymarket CLI or bot config examples."
+              exit 1
+            fi
+          fi
 
-          [[ "${gamma_url}" == https://api.serendb.com/publishers/polymarket-data/* ]]
-          [[ "${clob_url}" == https://api.serendb.com/publishers/polymarket-data/* ]]
-
-      - name: Enforce Runtime Guard And MCP Support
+      - name: Enforce CLI Defaults In Config
         run: |
           set -euo pipefail
-          runtime_path='artifacts/polymarket-maker-rebate-bot/scripts/agent.py'
-          test -f "${runtime_path}"
+          for config_path in \
+            artifacts/polymarket-maker-rebate-bot/config.example.json \
+            artifacts/polymarket/liquidity-paired-basis-maker/config.example.json
+          do
+            test -f "${config_path}"
+            gamma_url="$(jq -r '.polymarket_cli.gamma_markets_url // empty' "${config_path}")"
+            clob_url="$(jq -r '.polymarket_cli.clob_base_url // empty' "${config_path}")"
+            [[ "${gamma_url}" == "https://gamma-api.polymarket.com/markets" ]]
+            [[ "${clob_url}" == "https://clob.polymarket.com" ]]
+          done
 
-          grep -q 'SEREN_POLYMARKET_PUBLISHER_PREFIX = "/publishers/polymarket-data"' "${runtime_path}"
-          grep -q 'def _seren_publisher_path(' "${runtime_path}"
-          grep -q 'def _http_get_json_via_mcp(' "${runtime_path}"
-          grep -q '"name": "call_publisher"' "${runtime_path}"
-          grep -q 'SEREN_MCP_COMMAND' "${runtime_path}"
-          grep -q 'missing_seren_api_key' "${runtime_path}"
+      - name: Enforce Shared CLI Usage In Runtime
+        run: |
+          set -euo pipefail
+          test -f artifacts/shared/polymarket_cli.py
+          grep -q 'from polymarket_cli import' artifacts/polymarket-maker-rebate-bot/scripts/agent.py
+          grep -q 'from polymarket_cli import' artifacts/polymarket/liquidity-paired-basis-maker/scripts/agent.py

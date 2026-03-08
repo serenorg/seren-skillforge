@@ -5,6 +5,12 @@
     "live_mode": false,
     "require_positive_backtest": true
   },
+  "polymarket_cli": {
+    "command": [],
+    "timeout_seconds": 30,
+    "gamma_markets_url": "https://gamma-api.polymarket.com/markets",
+    "clob_base_url": "https://clob.polymarket.com"
+  },
   "backtest": {
     "days": 90,
     "days_range": {
@@ -19,9 +25,7 @@
     "max_markets": 80,
     "history_interval": "max",
     "history_fidelity_minutes": 60,
-    "history_fetch_workers": 4,
-    "gamma_markets_url": "https://api.serendb.com/publishers/polymarket-data/markets",
-    "clob_history_url": "https://api.serendb.com/publishers/polymarket-trading-serenai/prices-history"
+    "history_fetch_workers": 4
   },
   "strategy": {
     "bankroll_usd": 500,
