@@ -30,6 +30,10 @@ def render_skill_md(spec: NormalizedSkillSpec) -> str:
     return (
         f"{_render_frontmatter(spec)}\n"
         f"# {_to_title(spec.skill)}\n\n"
+        "## For Claude: How to Use This Skill\n\n"
+        "Skill instructions are preloaded in context when this skill is active. "
+        "Do not perform filesystem searches or tool-driven exploration to "
+        "rediscover them; use the guidance below directly.\n\n"
         "## When to Use\n\n"
         f"{trigger_lines}\n\n"
         "## Workflow Summary\n\n"

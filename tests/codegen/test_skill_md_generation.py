@@ -44,3 +44,11 @@ def test_generate_skill_md_is_idempotent() -> None:
     second = _render_from_example(REPO_ROOT / "examples/browser-automation/skill.spec.yaml")
     assert first == second
 
+
+def test_generate_skill_md_places_claude_section_before_when_to_use() -> None:
+    generated = _render_from_example(REPO_ROOT / "examples/browser-automation/skill.spec.yaml")
+    claude_heading = "## For Claude: How to Use This Skill"
+    when_to_use_heading = "## When to Use"
+
+    assert claude_heading in generated
+    assert generated.index(claude_heading) < generated.index(when_to_use_heading)
