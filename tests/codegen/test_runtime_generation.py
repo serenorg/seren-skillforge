@@ -6,7 +6,9 @@ from pathlib import Path
 from skillforge.codegen.config_files import (
     render_config_example_json,
     render_env_example,
+    render_requirements_txt,
     write_config_files,
+    write_requirements_txt,
 )
 from skillforge.codegen.runtime_python import render_agent_py, write_runtime_python
 from skillforge.parser import parse_spec
@@ -28,6 +30,7 @@ def test_render_env_and_config_match_polymarket_goldens() -> None:
 
     generated_env = render_env_example(spec)
     generated_config = render_config_example_json(spec)
+    generated_requirements = render_requirements_txt(spec)
 
     expected_env = (REPO_ROOT / "tests/golden/runtime/polymarket.env.expected").read_text(
         encoding="utf-8"
@@ -38,6 +41,10 @@ def test_render_env_and_config_match_polymarket_goldens() -> None:
 
     assert generated_env == expected_env
     assert generated_config == expected_config
+    assert (
+        generated_requirements
+        == "# No third-party runtime dependencies are required for polymarket-trader.\n"
+    )
 
 
 def test_write_runtime_and_config_outputs_files(tmp_path: Path) -> None:
@@ -45,13 +52,16 @@ def test_write_runtime_and_config_outputs_files(tmp_path: Path) -> None:
 
     runtime_path = write_runtime_python(spec, tmp_path)
     env_path, config_path = write_config_files(spec, tmp_path)
+    requirements_path = write_requirements_txt(spec, tmp_path)
 
     assert runtime_path == tmp_path / "scripts" / "agent.py"
     assert env_path == tmp_path / ".env.example"
     assert config_path == tmp_path / "config.example.json"
+    assert requirements_path == tmp_path / "requirements.txt"
     assert runtime_path.exists()
     assert env_path.exists()
     assert config_path.exists()
+    assert requirements_path.exists()
 
     runtime_text = runtime_path.read_text(encoding="utf-8")
     assert "DEFAULT_DRY_RUN = True" in runtime_text
@@ -60,6 +70,10 @@ def test_write_runtime_and_config_outputs_files(tmp_path: Path) -> None:
     assert config["skill"] == "browser-automation"
     assert config["dry_run"] is True
     assert config["inputs"]["url"] == ""
+    assert (
+        requirements_path.read_text(encoding="utf-8")
+        == "# No third-party runtime dependencies are required for browser-automation.\n"
+    )
 
 
 def test_render_agent_defaults_to_dry_run_when_policy_missing() -> None:

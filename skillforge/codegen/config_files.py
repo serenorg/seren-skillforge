@@ -8,6 +8,9 @@ from skillforge.ir import NormalizedSkillSpec
 
 ENV_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "env.example.j2"
 CONFIG_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "config.example.json.j2"
+REQUIREMENTS_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent / "templates" / "requirements.txt.j2"
+)
 
 
 def _default_input_value(definition: dict[str, Any]) -> Any:
@@ -52,6 +55,11 @@ def render_config_example_json(spec: NormalizedSkillSpec) -> str:
     return json.dumps(config, indent=2, sort_keys=True) + "\n"
 
 
+def render_requirements_txt(spec: NormalizedSkillSpec) -> str:
+    template = REQUIREMENTS_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return template.replace("{{skill_name}}", spec.skill)
+
+
 def write_config_files(spec: NormalizedSkillSpec, output_dir: Path) -> list[Path]:
     env_path = output_dir / ".env.example"
     config_path = output_dir / "config.example.json"
@@ -59,3 +67,8 @@ def write_config_files(spec: NormalizedSkillSpec, output_dir: Path) -> list[Path
     config_path.write_text(render_config_example_json(spec), encoding="utf-8")
     return [env_path, config_path]
 
+
+def write_requirements_txt(spec: NormalizedSkillSpec, output_dir: Path) -> Path:
+    requirements_path = output_dir / "requirements.txt"
+    requirements_path.write_text(render_requirements_txt(spec), encoding="utf-8")
+    return requirements_path

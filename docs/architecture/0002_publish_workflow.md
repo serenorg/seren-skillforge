@@ -14,7 +14,7 @@ The `publish` command handles:
 
 ## Default Safety Rules
 
-- Source must look like generated output (`SKILL.md`, `scripts/agent.py`, `tests/test_smoke.py`).
+- Source must look like generated output (`SKILL.md`, `.env.example`, `config.example.json`, `requirements.txt`, `scripts/agent.py`, `tests/test_smoke.py`).
 - Target must be a local git clone (contains `.git`).
 - Existing destination directories are rejected unless `--force` is explicitly provided.
 - No network calls are required unless `--create-pr` is enabled.

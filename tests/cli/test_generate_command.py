@@ -29,6 +29,7 @@ def test_generate_writes_expected_artifacts(tmp_path: Path) -> None:
         "scripts/agent.py",
         ".env.example",
         "config.example.json",
+        "requirements.txt",
         "tests/test_smoke.py",
         "tests/fixtures/happy_path.json",
         "tests/fixtures/connector_failure.json",

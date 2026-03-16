@@ -11,6 +11,9 @@ import typer
 
 REQUIRED_SOURCE_FILES = (
     Path("SKILL.md"),
+    Path(".env.example"),
+    Path("config.example.json"),
+    Path("requirements.txt"),
     Path("scripts/agent.py"),
     Path("tests/test_smoke.py"),
 )
