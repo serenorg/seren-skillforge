@@ -43,6 +43,10 @@ def _create_generated_source(base_dir: Path) -> Path:
     (source / "scripts" / "agent.py").write_text("print('ok')\n", encoding="utf-8")
     (source / ".env.example").write_text("SEREN_API_KEY=\n", encoding="utf-8")
     (source / "config.example.json").write_text("{}\n", encoding="utf-8")
+    (source / "requirements.txt").write_text(
+        "# No third-party runtime dependencies are required.\n",
+        encoding="utf-8",
+    )
     (source / "tests" / "test_smoke.py").write_text("def test_smoke(): pass\n", encoding="utf-8")
     (source / "tests" / "fixtures" / "happy_path.json").write_text(
         '{"status":"ok"}\n',
@@ -75,8 +79,35 @@ def test_publish_copies_generated_skill_into_target_repo(tmp_path: Path) -> None
     assert result.exit_code == 0, result.output
     published_dir = target_repo / "curve" / "gauge-reward-screener"
     assert (published_dir / "SKILL.md").exists()
+    assert (published_dir / "requirements.txt").exists()
     assert (published_dir / "scripts" / "agent.py").exists()
     assert "Published" in result.output
+
+
+def test_publish_rejects_missing_requirements_txt(tmp_path: Path) -> None:
+    source = _create_generated_source(tmp_path)
+    (source / "requirements.txt").unlink()
+    target_repo = tmp_path / "seren-skills"
+    target_repo.mkdir()
+    _init_git_repo(target_repo)
+
+    result = runner.invoke(
+        app,
+        [
+            "publish",
+            "--source",
+            str(source),
+            "--target",
+            str(target_repo),
+            "--org",
+            "curve",
+            "--name",
+            "gauge-reward-screener",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "requirements.txt" in result.output
 
 
 def test_publish_requires_force_to_overwrite_existing_output(tmp_path: Path) -> None:

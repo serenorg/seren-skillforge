@@ -4,7 +4,11 @@ from pathlib import Path
 
 import typer
 
-from skillforge.codegen.config_files import render_config_example_json, render_env_example
+from skillforge.codegen.config_files import (
+    render_config_example_json,
+    render_env_example,
+    render_requirements_txt,
+)
 from skillforge.codegen.generated_tests import render_fixture_payloads, render_smoke_test
 from skillforge.codegen.runtime_python import render_agent_py
 from skillforge.codegen.skill_md import render_skill_md
@@ -22,6 +26,7 @@ def _render_outputs(spec_path: Path) -> dict[Path, str]:
         Path("scripts/agent.py"): render_agent_py(spec),
         Path(".env.example"): render_env_example(spec),
         Path("config.example.json"): render_config_example_json(spec),
+        Path("requirements.txt"): render_requirements_txt(spec),
         Path("tests/test_smoke.py"): render_smoke_test(spec),
     }
     for fixture_name, payload in render_fixture_payloads(spec).items():
