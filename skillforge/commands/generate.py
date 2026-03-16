@@ -18,6 +18,10 @@ from skillforge.parser import parse_spec
 from skillforge.publisher_catalog import DEFAULT_GATEWAY_URL
 
 
+class GenerateError(Exception):
+    """Raised when generation cannot complete."""
+
+
 def _render_outputs(spec_path: Path) -> dict[Path, str]:
     parsed = parse_spec(spec_path)
     spec = parsed.ir
@@ -57,6 +61,67 @@ def _write_outputs(*, out_dir: Path, outputs: dict[Path, str]) -> list[Path]:
     return written_paths
 
 
+def run(
+    *,
+    spec: Path,
+    out: Path,
+    check: bool,
+    resolve_publishers: bool,
+    gateway_url: str,
+    api_key_env: str,
+    require_api_key: bool,
+) -> list[Path]:
+    if resolve_publishers:
+        resolved = resolve_publishers_command.run(
+            spec=spec,
+            gateway_url=gateway_url,
+            api_key_env=api_key_env,
+            require_api_key=require_api_key,
+            allow_inactive=False,
+            write=False,
+        )
+        if not resolved.ok:
+            lines = [
+                f"FAIL [generate] publisher resolution failed catalog={resolved.catalog_size}",
+                *(
+                    f"[{issue.code}] {issue.path}: {issue.message}"
+                    for issue in resolved.issues
+                ),
+            ]
+            raise GenerateError("\n".join(lines))
+        if resolved.changes:
+            lines = [
+                f"FAIL [generate] unresolved publisher slugs={len(resolved.changes)}. "
+                "Run `skillforge resolve-publishers --write` first.",
+                *(
+                    f"{change.connector}: {change.from_slug or '<empty>'} -> "
+                    f"{change.to_slug} ({change.source})"
+                    for change in resolved.changes
+                ),
+            ]
+            raise GenerateError("\n".join(lines))
+
+    validation = validate_command.run(spec=spec)
+    if not validation.ok:
+        lines = [
+            f"FAIL [generate] spec validation failed checks={validation.checks_run}",
+            *validate_command.format_failures(validation),
+        ]
+        raise GenerateError("\n".join(lines))
+
+    outputs = _render_outputs(spec)
+
+    if check:
+        stale = _stale_paths(out_dir=out, outputs=outputs)
+        if stale:
+            lines = [f"FAIL [generate --check] stale outputs: {len(stale)}"]
+            lines.extend(relative_path.as_posix() for relative_path in stale)
+            raise GenerateError("\n".join(lines))
+        return []
+
+    return _write_outputs(out_dir=out, outputs=outputs)
+
+
 def command(
     spec: Path = typer.Option(
         Path("skill.spec.yaml"),
@@ -94,52 +159,22 @@ def command(
         help="Fail if publisher resolution is enabled and API key env var is missing.",
     ),
 ) -> None:
-    if resolve_publishers:
-        resolved = resolve_publishers_command.run(
+    try:
+        written_paths = run(
             spec=spec,
+            out=out,
+            check=check,
+            resolve_publishers=resolve_publishers,
             gateway_url=gateway_url,
             api_key_env=api_key_env,
             require_api_key=require_api_key,
-            allow_inactive=False,
-            write=False,
         )
-        if not resolved.ok:
-            typer.echo(
-                f"FAIL [generate] publisher resolution failed catalog={resolved.catalog_size}"
-            )
-            for issue in resolved.issues:
-                typer.echo(f"[{issue.code}] {issue.path}: {issue.message}")
-            raise typer.Exit(code=1)
-        if resolved.changes:
-            typer.echo(
-                f"FAIL [generate] unresolved publisher slugs={len(resolved.changes)}. "
-                "Run `skillforge resolve-publishers --write` first."
-            )
-            for change in resolved.changes:
-                typer.echo(
-                    f"{change.connector}: {change.from_slug or '<empty>'} -> "
-                    f"{change.to_slug} ({change.source})"
-                )
-            raise typer.Exit(code=1)
-
-    validation = validate_command.run(spec=spec)
-    if not validation.ok:
-        typer.echo(f"FAIL [generate] spec validation failed checks={validation.checks_run}")
-        validate_command.print_failures(validation)
-        raise typer.Exit(code=1)
-
-    outputs = _render_outputs(spec)
+    except GenerateError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
 
     if check:
-        stale = _stale_paths(out_dir=out, outputs=outputs)
-        if stale:
-            typer.echo(f"FAIL [generate --check] stale outputs: {len(stale)}")
-            for relative_path in stale:
-                typer.echo(relative_path.as_posix())
-            raise typer.Exit(code=1)
-
         typer.echo("PASS [generate --check] outputs are up-to-date")
         return
 
-    written_paths = _write_outputs(out_dir=out, outputs=outputs)
     typer.echo(f"Generated {len(written_paths)} files in {out}")

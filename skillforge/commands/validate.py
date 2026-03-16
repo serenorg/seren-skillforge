@@ -144,8 +144,12 @@ def run(
 
 
 def print_failures(result: HarnessResult) -> None:
-    for failure in result.failures:
-        typer.echo(f"[{failure.code}] {failure.path}: {failure.message}")
+    for line in format_failures(result):
+        typer.echo(line)
+
+
+def format_failures(result: HarnessResult) -> list[str]:
+    return [f"[{failure.code}] {failure.path}: {failure.message}" for failure in result.failures]
 
 
 def command(
