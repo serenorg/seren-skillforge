@@ -7,6 +7,7 @@ import typer
 from skillforge.commands import generate as generate_command
 from skillforge.commands import init as init_command
 from skillforge.commands import publish as publish_command
+from skillforge.commands import release as release_command
 from skillforge.commands import resolve_publishers as resolve_publishers_command
 from skillforge.commands import test as test_command
 from skillforge.commands import validate as validate_command
@@ -15,7 +16,7 @@ app = typer.Typer(
     name="skillforge",
     no_args_is_help=True,
     add_completion=False,
-    help="SkillForge CLI for generating and validating skills from SkillSpec.",
+    help="SkillForge CLI for generating, validating, and releasing skills from SkillSpec.",
 )
 
 
@@ -37,6 +38,7 @@ app.command("validate")(validate_command.command)
 app.command("generate")(generate_command.command)
 app.command("test")(test_command.command)
 app.command("publish")(publish_command.command)
+app.command("release")(release_command.command)
 app.command("resolve-publishers")(resolve_publishers_command.command)
 
 

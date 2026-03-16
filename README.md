@@ -48,10 +48,13 @@ python -m skillforge validate --spec examples/minimal/skill.spec.yaml
 python -m skillforge validate --spec examples/polymarket-trader/skill.spec.yaml --online-publishers --require-api-key
 python -m skillforge resolve-publishers --spec examples/polymarket-trader/skill.spec.yaml --check --require-api-key
 python -m skillforge resolve-publishers --spec examples/polymarket-trader/skill.spec.yaml --write --require-api-key
+python -m skillforge release --spec examples/browser-automation/skill.spec.yaml --target ../seren-skills
+python -m skillforge release --spec examples/polymarket-trader/skill.spec.yaml --target ../seren-skills --resolve-publishers --require-api-key --create-pr
 python -m skillforge generate --spec examples/minimal/skill.spec.yaml --out /tmp/skillforge-out
-python -m skillforge generate --spec examples/polymarket-trader/skill.spec.yaml --out /tmp/skillforge-out --resolve-publishers --require-api-key
 python -m skillforge test --mode quick --spec examples/minimal/skill.spec.yaml
 ```
+
+`release` is the default shipping path. It generates artifacts into a temporary directory, publishes them into a local `seren-skills` clone using `publish.org` and `publish.slug` from the spec, and can open the destination PR with `--create-pr`.
 
 ## Publisher Guardrails
 

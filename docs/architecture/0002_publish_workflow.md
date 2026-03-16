@@ -4,6 +4,8 @@
 
 Define how SkillForge syncs generated artifacts into a local `seren-skills` clone with safe defaults.
 
+Most users should ship skills through `skillforge release`, which generates into a temporary directory and then delegates to `publish`. The `publish` command remains the lower-level sync primitive.
+
 ## Scope
 
 The `publish` command handles:
