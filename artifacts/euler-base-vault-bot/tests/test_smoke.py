@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 
@@ -33,4 +32,3 @@ def test_dry_run_fixture_blocks_live_execution() -> None:
     payload = _read_fixture("dry_run_guard.json")
     assert payload["dry_run"] is True
     assert payload["blocked_action"] == "live_execution"
-
