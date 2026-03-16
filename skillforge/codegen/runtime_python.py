@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from pprint import pformat
 
 from skillforge.ir import NormalizedSkillSpec
 
@@ -14,18 +15,19 @@ def _as_python_bool(value: bool) -> str:
     return "True" if value else "False"
 
 
+def _format_connectors(connectors: list[str]) -> str:
+    if not connectors:
+        return "[]"
+    return pformat(connectors, width=76)
+
+
 def render_agent_py(spec: NormalizedSkillSpec) -> str:
     template_path = TEMPLATE_PATH
     if spec.skill == "ledger-signing":
         template_path = LEDGER_TEMPLATE_PATH
     template = template_path.read_text(encoding="utf-8")
     default_dry_run = bool(spec.policies.get("dry_run_default", True))
-    connectors = sorted(spec.connectors.keys())
-    connector_repr = ", ".join(repr(name) for name in connectors)
-    if connector_repr:
-        connector_repr = f"[{connector_repr}]"
-    else:
-        connector_repr = "[]"
+    connector_repr = _format_connectors(sorted(spec.connectors.keys()))
 
     rendered = (
         template.replace("{{skill_name}}", spec.skill)
