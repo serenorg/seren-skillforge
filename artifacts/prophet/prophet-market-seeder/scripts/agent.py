@@ -7,7 +7,6 @@ import argparse
 import json
 from pathlib import Path
 
-
 DEFAULT_DRY_RUN = True
 AVAILABLE_CONNECTORS = ['storage']
 
