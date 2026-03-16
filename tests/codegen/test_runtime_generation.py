@@ -68,6 +68,14 @@ def test_render_agent_defaults_to_dry_run_when_policy_missing() -> None:
     assert "DEFAULT_DRY_RUN = True" in generated
 
 
+def test_render_agent_wraps_long_connector_lists_for_ruff() -> None:
+    spec = parse_spec(REPO_ROOT / "examples/peer-to-peer-payments-exchange/skill.spec.yaml").ir
+    generated = render_agent_py(spec)
+
+    assert "\n\n\nDEFAULT_DRY_RUN" not in generated
+    assert max(len(line) for line in generated.splitlines()) <= 100
+
+
 def test_render_agent_for_ledger_signing_contains_hid_signing_runtime() -> None:
     spec = parse_spec(REPO_ROOT / "examples/ledger-signing/skill.spec.yaml").ir
     generated = render_agent_py(spec)

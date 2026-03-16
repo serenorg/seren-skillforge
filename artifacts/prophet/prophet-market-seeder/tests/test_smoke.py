@@ -13,7 +13,7 @@ def _read_fixture(name: str) -> dict:
 def test_happy_path_fixture_is_successful() -> None:
     payload = _read_fixture("happy_path.json")
     assert payload["status"] == "ok"
-    assert payload["skill"] == "peer-to-peer-payments-exchange"
+    assert payload["skill"] == "prophet-market-seeder"
 
 
 def test_connector_failure_fixture_has_error_code() -> None:
@@ -32,3 +32,4 @@ def test_dry_run_fixture_blocks_live_execution() -> None:
     payload = _read_fixture("dry_run_guard.json")
     assert payload["dry_run"] is True
     assert payload["blocked_action"] == "live_execution"
+

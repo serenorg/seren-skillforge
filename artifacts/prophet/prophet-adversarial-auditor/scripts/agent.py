@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generated SkillForge runtime for {{skill_name}}."""
+"""Generated SkillForge runtime for prophet-adversarial-auditor."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import argparse
 import json
 from pathlib import Path
 
-DEFAULT_DRY_RUN = {{default_dry_run}}
-AVAILABLE_CONNECTORS = {{connectors}}
+DEFAULT_DRY_RUN = True
+AVAILABLE_CONNECTORS = ['storage']
 
 
 def parse_args() -> argparse.Namespace:
